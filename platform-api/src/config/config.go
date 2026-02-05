@@ -45,6 +45,8 @@ type Server struct {
 	// Default DevPortal configurations
 	DefaultDevPortal DefaultDevPortal `envconfig:"DEFAULT_DEVPORTAL"`
 
+	// Deployment configurations
+	Deployments Deployments `envconfig:"DEPLOYMENTS"`
 	// TLS configurations
 	TLS TLS `envconfig:"TLS"`
 }
@@ -71,19 +73,24 @@ type WebSocket struct {
 
 // Database holds database-specific configuration
 type Database struct {
-	Driver   string `envconfig:"DRIVER" default:"sqlite3"`
-	Path     string `envconfig:"PATH" default:"./data/api_platform.db"`
-	Host     string `envconfig:"HOST" default:"localhost"`
-	Port     int    `envconfig:"PORT" default:"5432"`
-	Name     string `envconfig:"NAME" default:"platform_api"`
-	User     string `envconfig:"USER" default:""`
-	Password string `envconfig:"PASSWORD" default:""`
-	SSLMode  string `envconfig:"SSL_MODE" default:"disable"`
+	Driver string `envconfig:"DRIVER" default:"sqlite3"`
+	// DBPath is the file path for SQLite databases.
+	// Use DATABASE_DB_PATH to override; keeping it distinct from the OS PATH variable.
+	Path            string `envconfig:"DB_PATH" default:"./data/api_platform.db"`
+	Host            string `envconfig:"HOST" default:"localhost"`
+	Port            int    `envconfig:"PORT" default:"5432"`
+	Name            string `envconfig:"NAME" default:"platform_api"`
+	User            string `envconfig:"USER" default:""`
+	Password        string `envconfig:"PASSWORD" default:""`
+	SSLMode         string `envconfig:"SSL_MODE" default:"disable"`
+	MaxOpenConns    int    `envconfig:"MAX_OPEN_CONNS" default:"25"`
+	MaxIdleConns    int    `envconfig:"MAX_IDLE_CONNS" default:"10"`
+	ConnMaxLifetime int    `envconfig:"CONN_MAX_LIFETIME" default:"300"` // seconds
 
-	// SQLite specific settings
-	MaxOpenConns    int `envconfig:"MAX_OPEN_CONNS" default:"25"`
-	MaxIdleConns    int `envconfig:"MAX_IDLE_CONNS" default:"10"`
-	ConnMaxLifetime int `envconfig:"CONN_MAX_LIFETIME" default:"300"` // seconds
+	// ExecuteSchemaDDL controls whether to run the schema DDL (CREATE TABLE, etc.) on startup.
+	// Set to false when the DB user lacks DDL privileges (e.g. deployed Postgres with restricted role).
+	// Env: DATABASE_EXECUTE_SCHEMA_DDL (default: true)
+	ExecuteSchemaDDL bool `envconfig:"EXECUTE_SCHEMA_DDL" default:"true"`
 }
 
 // DefaultDevPortal holds default DevPortal configuration for new organizations
@@ -104,6 +111,11 @@ type DefaultDevPortal struct {
 	AdminRole             string `envconfig:"ADMIN_ROLE" default:"admin"`
 	SubscriberRole        string `envconfig:"SUBSCRIBER_ROLE" default:"Internal/subscriber"`
 	SuperAdminRole        string `envconfig:"SUPER_ADMIN_ROLE" default:"superAdmin"`
+}
+
+// Deployments holds deployment-specific configuration
+type Deployments struct {
+	MaxPerAPIGateway int `envconfig:"MAX_PER_API_GATEWAY" default:"20"`
 }
 
 // package-level variable and mutex for thread safety
@@ -133,8 +145,6 @@ func GetConfig() *Server {
 	if err != nil {
 		panic(err)
 	}
-	settingInstance.Database.Driver = "sqlite3"
-	settingInstance.Database.Path = "./data/api_platform.db"
 	return settingInstance
 }
 

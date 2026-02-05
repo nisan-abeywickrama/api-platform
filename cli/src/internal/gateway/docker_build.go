@@ -24,6 +24,7 @@ import (
 	"os/exec"
 	"path/filepath"
 
+	"github.com/wso2/api-platform/cli/internal/terminal"
 	"github.com/wso2/api-platform/cli/utils"
 )
 
@@ -52,8 +53,8 @@ func BuildGatewayImages(config DockerBuildConfig) error {
 	}
 	defer logFile.Close()
 
-	// Step 1: Run gateway-builder container
-	fmt.Println("  → Running gateway-builder container...")
+	// Step 1: Run gateway-builder
+	fmt.Println("  → Running gateway-builder...")
 	if err := runGatewayBuilder(config, logFile); err != nil {
 		return fmt.Errorf("failed to run gateway-builder: %w\n\nCheck logs at: %s", err, config.LogFilePath)
 	}
@@ -97,22 +98,29 @@ func BuildGatewayImages(config DockerBuildConfig) error {
 
 // runGatewayBuilder runs the gateway-builder container
 func runGatewayBuilder(config DockerBuildConfig, logFile *os.File) error {
-	args := []string{"run", "--rm", "-v", config.TempDir + ":/workspace", config.GatewayBuilder}
-
-	if config.GatewayControllerBaseImage != "" {
-		args = append(args, "-gateway-controller-base-image", config.GatewayControllerBaseImage)
-	}
-	if config.RouterBaseImage != "" {
-		args = append(args, "-router-base-image", config.RouterBaseImage)
+	args := []string{"run", "--rm", "-v", config.TempDir + ":/workspace", config.GatewayBuilder,
+		"-gateway-controller-base-image", config.GatewayControllerBaseImage,
+		"-router-base-image", config.RouterBaseImage,
 	}
 
 	cmd := exec.Command("docker", args...)
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
+
+	// Setup scrolling output - auto-detects TTY internally, falls back to file-only if not TTY
+	scroller := terminal.NewScrollingLogger(terminal.ScrollingLoggerConfig{
+		LogFile: logFile,
+		Prefix:  "    ",
+	})
+	cmd.Stdout = scroller
+	cmd.Stderr = scroller
+	scroller.Start()
+	defer scroller.Stop()
 
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("docker command failed: %w", err)
 	}
+
+	// Clear the scrolled logs before returning success
+	scroller.ClearDisplay()
 	return nil
 }
 
@@ -134,12 +142,25 @@ func buildWithBuildx(config DockerBuildConfig, components []string, logFile *os.
 
 		cmd := exec.Command("docker", args...)
 		cmd.Dir = componentDir
-		cmd.Stdout = logFile
-		cmd.Stderr = logFile
 
-		if err := cmd.Run(); err != nil {
+		// Setup scrolling output - auto-detects TTY internally, falls back to file-only if not TTY
+		scroller := terminal.NewScrollingLogger(terminal.ScrollingLoggerConfig{
+			LogFile: logFile,
+			Prefix:  "      ",
+		})
+		cmd.Stdout = scroller
+		cmd.Stderr = scroller
+		scroller.Start()
+
+		err := cmd.Run()
+		scroller.Stop()
+
+		if err != nil {
 			return fmt.Errorf("failed to build %s: %w\n\nCheck logs at: %s", component, err, config.LogFilePath)
 		}
+
+		// Clear the scrolled logs before printing success message
+		scroller.ClearDisplay()
 		fmt.Printf("    ✓ Built and pushed %s\n", imageTag)
 	}
 
@@ -164,12 +185,25 @@ func buildWithDocker(config DockerBuildConfig, components []string, logFile *os.
 
 		cmd := exec.Command("docker", args...)
 		cmd.Dir = componentDir
-		cmd.Stdout = logFile
-		cmd.Stderr = logFile
 
-		if err := cmd.Run(); err != nil {
+		// Setup scrolling output - auto-detects TTY internally, falls back to file-only if not TTY
+		scroller := terminal.NewScrollingLogger(terminal.ScrollingLoggerConfig{
+			LogFile: logFile,
+			Prefix:  "      ",
+		})
+		cmd.Stdout = scroller
+		cmd.Stderr = scroller
+		scroller.Start()
+
+		err := cmd.Run()
+		scroller.Stop()
+
+		if err != nil {
 			return fmt.Errorf("failed to build %s: %w\n\nCheck logs at: %s", component, err, config.LogFilePath)
 		}
+
+		// Clear the scrolled logs before printing success message
+		scroller.ClearDisplay()
 		fmt.Printf("    ✓ Built %s\n", imageTag)
 	}
 
@@ -185,12 +219,25 @@ func pushImages(config DockerBuildConfig, components []string, logFile *os.File)
 		fmt.Printf("    → Pushing %s...\n", component)
 
 		cmd := exec.Command("docker", "push", imageTag)
-		cmd.Stdout = logFile
-		cmd.Stderr = logFile
 
-		if err := cmd.Run(); err != nil {
+		// Setup scrolling output - auto-detects TTY internally, falls back to file-only if not TTY
+		scroller := terminal.NewScrollingLogger(terminal.ScrollingLoggerConfig{
+			LogFile: logFile,
+			Prefix:  "      ",
+		})
+		cmd.Stdout = scroller
+		cmd.Stderr = scroller
+		scroller.Start()
+
+		err := cmd.Run()
+		scroller.Stop()
+
+		if err != nil {
 			return fmt.Errorf("failed to push %s: %w\n\nCheck logs at: %s", component, err, config.LogFilePath)
 		}
+
+		// Clear the scrolled logs before printing success message
+		scroller.ClearDisplay()
 		fmt.Printf("    ✓ Pushed %s\n", imageTag)
 	}
 

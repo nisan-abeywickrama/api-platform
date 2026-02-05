@@ -19,14 +19,20 @@
 package discovery
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"time"
 
 	"github.com/wso2/api-platform/gateway/gateway-builder/pkg/errors"
 	"github.com/wso2/api-platform/gateway/gateway-builder/pkg/fsutil"
 	"github.com/wso2/api-platform/gateway/gateway-builder/pkg/types"
+	"golang.org/x/mod/modfile"
 	"gopkg.in/yaml.v3"
 )
 
@@ -35,7 +41,7 @@ const (
 )
 
 // LoadManifest loads and validates the policy manifest lock file
-func LoadManifest(manifestLockPath string) (*types.PolicyManifestLock, error) {
+func LoadManifest(manifestLockPath string) (*types.PolicyManifest, error) {
 	slog.Debug("Reading manifest lock file", "path", manifestLockPath, "phase", "discovery")
 
 	// Read manifest lock file
@@ -48,7 +54,7 @@ func LoadManifest(manifestLockPath string) (*types.PolicyManifestLock, error) {
 	}
 
 	// Parse YAML
-	var manifest types.PolicyManifestLock
+	var manifest types.PolicyManifest
 	if err := yaml.Unmarshal(data, &manifest); err != nil {
 		return nil, errors.NewDiscoveryError(
 			"failed to parse manifest YAML",
@@ -70,8 +76,8 @@ func LoadManifest(manifestLockPath string) (*types.PolicyManifestLock, error) {
 }
 
 // validateManifest validates the manifest lock structure and contents
-func validateManifest(manifest *types.PolicyManifestLock) error {
-	// Check version
+func validateManifest(manifest *types.PolicyManifest) error {
+	// Check manifest version
 	if manifest.Version == "" {
 		return errors.NewDiscoveryError("manifest version is required", nil)
 	}
@@ -95,8 +101,8 @@ func validateManifest(manifest *types.PolicyManifestLock) error {
 		slog.Debug("Validating manifest entry",
 			"index", i,
 			"name", entry.Name,
-			"version", entry.Version,
 			"filePath", entry.FilePath,
+			"gomodule", entry.Gomodule,
 			"phase", "discovery")
 
 		// Check required fields
@@ -107,15 +113,19 @@ func validateManifest(manifest *types.PolicyManifestLock) error {
 			)
 		}
 
-		if entry.Version == "" {
+		if entry.FilePath == "" && entry.Gomodule == "" {
 			return errors.NewDiscoveryError(
-				fmt.Sprintf("policy entry %d (%s): version is required", i, entry.Name),
+				fmt.Sprintf("policy entry %d (%s): either filePath or gomodule must be provided", i, entry.Name),
 				nil,
 			)
 		}
 
-		// Check for duplicates (name:version combination must be unique)
-		key := fmt.Sprintf("%s:%s", entry.Name, entry.Version)
+		if entry.FilePath != "" && entry.Gomodule != "" {
+			slog.Debug("Both filePath and gomodule provided; preferring filePath", "name", entry.Name)
+		}
+
+		// Check for duplicates based on name + filePath/gomodule to avoid ambiguity
+		key := fmt.Sprintf("%s:%s|%s", entry.Name, entry.FilePath, entry.Gomodule)
 		if seen[key] {
 			return errors.NewDiscoveryError(
 				fmt.Sprintf("duplicate policy entry: %s", key),
@@ -163,20 +173,69 @@ func DiscoverPoliciesFromManifest(manifestLockPath string, baseDir string) ([]*t
 
 	// Process each manifest entry
 	for _, entry := range manifest.Policies {
-		filePath := entry.FilePath
-		policyPath := filepath.Join(baseDir, filePath)
+		var policyPath string
+		var source string
+		var goModulePath string
+		var goModuleVersion string
+		var isFilePathEntry bool
 
-		slog.Debug("Resolving policy path",
+		if entry.FilePath != "" {
+			policyPath = filepath.Join(baseDir, entry.FilePath)
+			source = "filePath"
+			isFilePathEntry = true
+
+			// Read the module path from the policy's own go.mod
+			modulePath, err := extractModulePathFromGoMod(filepath.Join(policyPath, "go.mod"))
+			if err != nil {
+				return nil, errors.NewDiscoveryError(
+					fmt.Sprintf("failed to read module path from go.mod for %s: %v", entry.Name, err),
+					err,
+				)
+			}
+			goModulePath = modulePath
+
+			slog.Info("Resolved policy entry via filePath",
+				"name", entry.Name,
+				"filePath", entry.FilePath,
+				"resolvedPath", policyPath,
+				"goModulePath", goModulePath)
+		} else if entry.Gomodule != "" {
+			modInfo, err := resolveModuleInfo(entry.Gomodule)
+			if err != nil {
+				return nil, errors.NewDiscoveryError(
+					fmt.Sprintf("failed to resolve gomodule for %s: %v", entry.Name, err),
+					err,
+				)
+			}
+			policyPath = modInfo.Dir
+			goModulePath = modInfo.Path
+			goModuleVersion = modInfo.Version
+			source = "gomodule"
+
+			slog.Info("Resolved policy entry via remote module",
+				"name", entry.Name,
+				"gomodule", entry.Gomodule,
+				"resolvedPath", policyPath,
+				"goModuleVersion", goModuleVersion)
+		} else {
+			return nil, errors.NewDiscoveryError(
+				fmt.Sprintf("policy entry %s: either filePath or gomodule must be provided", entry.Name),
+				nil,
+			)
+		}
+
+		slog.Debug("Resolving policy",
 			"policy", entry.Name,
-			"version", entry.Version,
-			"filePath", filePath,
-			"resolvedPath", policyPath,
+			"source", source,
+			"path", policyPath,
+			"goModulePath", goModulePath,
+			"goModuleVersion", goModuleVersion,
 			"phase", "discovery")
 
 		// Check path exists and is accessible
 		if err := fsutil.ValidatePathExists(policyPath, "policy path"); err != nil {
 			return nil, errors.NewDiscoveryError(
-				fmt.Sprintf("from manifest entry %s:%s: %v", entry.Name, entry.Version, err),
+				fmt.Sprintf("from manifest entry %s: %v", entry.Name, err),
 				err,
 			)
 		}
@@ -184,7 +243,7 @@ func DiscoverPoliciesFromManifest(manifestLockPath string, baseDir string) ([]*t
 		// Validate directory structure
 		if err := ValidateDirectoryStructure(policyPath); err != nil {
 			return nil, errors.NewDiscoveryError(
-				fmt.Sprintf("invalid structure for %s:%s at %s", entry.Name, entry.Version, policyPath),
+				fmt.Sprintf("invalid structure for %s at %s", entry.Name, policyPath),
 				err,
 			)
 		}
@@ -194,7 +253,7 @@ func DiscoverPoliciesFromManifest(manifestLockPath string, baseDir string) ([]*t
 		definition, err := ParsePolicyYAML(policyYAMLPath)
 		if err != nil {
 			return nil, errors.NewDiscoveryError(
-				fmt.Sprintf("failed to parse %s for %s:%s at %s", types.PolicyDefinitionFile, entry.Name, entry.Version, policyPath),
+				fmt.Sprintf("failed to parse %s for %s at %s", types.PolicyDefinitionFile, entry.Name, policyPath),
 				err,
 			)
 		}
@@ -205,7 +264,7 @@ func DiscoverPoliciesFromManifest(manifestLockPath string, baseDir string) ([]*t
 			"path", policyYAMLPath,
 			"phase", "discovery")
 
-		// Validate manifest entry matches policy definition
+		// Validate manifest entry matches policy definition name
 		if entry.Name != definition.Name {
 			return nil, errors.NewDiscoveryError(
 				fmt.Sprintf("policy name mismatch: manifest declares '%s' but %s has '%s' at %s",
@@ -214,10 +273,9 @@ func DiscoverPoliciesFromManifest(manifestLockPath string, baseDir string) ([]*t
 			)
 		}
 
-		if entry.Version != definition.Version {
+		if definition.Version == "" {
 			return nil, errors.NewDiscoveryError(
-				fmt.Sprintf("policy version mismatch: manifest declares '%s' but %s has '%s' for %s at %s",
-					entry.Version, types.PolicyDefinitionFile, definition.Version, entry.Name, policyPath),
+				fmt.Sprintf("policy version cannot be found in definition for %s", entry.Name),
 				nil,
 			)
 		}
@@ -226,7 +284,7 @@ func DiscoverPoliciesFromManifest(manifestLockPath string, baseDir string) ([]*t
 		sourceFiles, err := CollectSourceFiles(policyPath)
 		if err != nil {
 			return nil, errors.NewDiscoveryError(
-				fmt.Sprintf("failed to collect source files for %s:%s at %s", entry.Name, entry.Version, policyPath),
+				fmt.Sprintf("failed to collect source files for %s:%s at %s", entry.Name, definition.Version, policyPath),
 				err,
 			)
 		}
@@ -247,10 +305,77 @@ func DiscoverPoliciesFromManifest(manifestLockPath string, baseDir string) ([]*t
 			SourceFiles:      sourceFiles,
 			SystemParameters: ExtractDefaultValues(definition.SystemParameters),
 			Definition:       definition,
+			GoModulePath:     goModulePath,
+			GoModuleVersion:  goModuleVersion,
+			IsFilePathEntry:  isFilePathEntry,
 		}
 
 		discovered = append(discovered, policy)
 	}
 
 	return discovered, nil
+}
+
+// moduleInfo contains resolved module information from 'go mod download'
+type moduleInfo struct {
+	Path    string // e.g., "github.com/wso2/gateway-controllers/policies/add-headers"
+	Version string // e.g., "v0.1.0"
+	Dir     string // Local directory path in module cache
+}
+
+// resolveModuleInfo resolves a Go module and returns full module information
+func resolveModuleInfo(gomodule string) (*moduleInfo, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "go", "mod", "download", "-json", gomodule)
+
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	out, err := cmd.Output()
+	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return nil, fmt.Errorf("timed out while running 'go mod download -json %s'", gomodule)
+		}
+		return nil, fmt.Errorf("failed to run 'go mod download -json %s': %w; stderr: %s", gomodule, err, stderr.String())
+	}
+
+	var info struct {
+		Path    string `json:"Path"`
+		Version string `json:"Version"`
+		Dir     string `json:"Dir"`
+	}
+	if err := json.Unmarshal(out, &info); err != nil {
+		return nil, fmt.Errorf("failed to parse 'go mod download' output: %w", err)
+	}
+
+	if info.Dir == "" {
+		return nil, fmt.Errorf("module download did not return a Dir for %s", gomodule)
+	}
+
+	return &moduleInfo{
+		Path:    info.Path,
+		Version: info.Version,
+		Dir:     info.Dir,
+	}, nil
+}
+
+// extractModulePathFromGoMod reads the module path from a go.mod file
+func extractModulePathFromGoMod(goModPath string) (string, error) {
+	data, err := os.ReadFile(goModPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to read go.mod: %w", err)
+	}
+
+	modFile, err := modfile.Parse(goModPath, data, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse go.mod: %w", err)
+	}
+
+	if modFile.Module == nil || modFile.Module.Mod.Path == "" {
+		return "", fmt.Errorf("module directive missing in go.mod: %s", goModPath)
+	}
+
+	return modFile.Module.Mod.Path, nil
 }

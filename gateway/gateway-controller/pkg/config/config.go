@@ -20,14 +20,24 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
-	"github.com/knadh/koanf/parsers/yaml"
+	"github.com/go-viper/mapstructure/v2"
+	toml "github.com/knadh/koanf/parsers/toml/v2"
 	"github.com/knadh/koanf/providers/env"
 	"github.com/knadh/koanf/providers/file"
 	"github.com/knadh/koanf/v2"
+	commonconstants "github.com/wso2/api-platform/common/constants"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/constants"
+)
+
+const (
+	// EnvPrefix is the prefix for environment variables used to configure the gateway-controller
+	EnvPrefix = "APIP_GW_"
+	// DefaultLuaScriptPath is the default path for request transformation lua script
+	DefaultLuaScriptPath = "./lua/request_transformation.lua"
 )
 
 // Config holds all configuration for the gateway-controller
@@ -44,7 +54,21 @@ type AnalyticsConfig struct {
 	Enabled              bool                     `koanf:"enabled"`
 	Publishers           []map[string]interface{} `koanf:"publishers"`
 	GRPCAccessLogCfg     GRPCAccessLogConfig      `koanf:"grpc_access_logs"`
-	AccessLogsServiceCfg map[string]interface{}   `koanf:"access_logs_service"`
+	AccessLogsServiceCfg AccessLogsServiceConfig  `koanf:"access_logs_service"`
+	// AllowPayloads controls whether request and response bodies are captured
+	// into analytics metadata and forwarded to analytics publishers.
+	AllowPayloads bool `koanf:"allow_payloads"`
+}
+
+// AccessLogsServiceConfig holds the access logs service configuration
+type AccessLogsServiceConfig struct {
+	ALSServerPort   int           `koanf:"als_server_port"`
+	ShutdownTimeout time.Duration `koanf:"shutdown_timeout"`
+	PublicKeyPath   string        `koanf:"public_key_path"`
+	PrivateKeyPath  string        `koanf:"private_key_path"`
+	ALSPlainText    bool          `koanf:"als_plain_text"`
+	MaxMessageSize  int           `koanf:"max_message_size"`
+	MaxHeaderLimit  int           `koanf:"max_header_limit"`
 }
 
 // GatewayController holds the main configuration sections for the gateway-controller
@@ -58,6 +82,7 @@ type GatewayController struct {
 	Policies     PoliciesConfig     `koanf:"policies"`
 	LLM          LLMConfig          `koanf:"llm"`
 	Auth         AuthConfig         `koanf:"auth"`
+	APIKey       APIKeyConfig       `koanf:"api_key"`
 	Metrics      MetricsConfig      `koanf:"metrics"`
 }
 
@@ -184,6 +209,8 @@ type RouterConfig struct {
 	HTTPSEnabled  bool               `koanf:"https_enabled"`
 	HTTPSPort     int                `koanf:"https_port"`
 	GatewayHost   string             `koanf:"gateway_host"`
+	Lua           RouterLuaConfig     `koanf:"lua"`
+	LuaScriptPath string             `koanf:"lua_script_path"` // Deprecated: use router.lua.request_transformation.script_path
 	Upstream      envoyUpstream      `koanf:"envoy_upstream"`
 	PolicyEngine  PolicyEngineConfig `koanf:"policy_engine"`
 	DownstreamTLS DownstreamTLS      `koanf:"downstream_tls"`
@@ -191,13 +218,29 @@ type RouterConfig struct {
 	VHosts        VHostsConfig       `koanf:"vhosts"`
 	// Tracing holds OpenTelemetry exporter configuration
 	TracingServiceName string `koanf:"tracing_service_name"`
+
+	// HTTPListener configuration
+	HTTPListener HTTPListenerConfig `koanf:"http_listener"`
+}
+
+// RouterLuaConfig holds Lua related configurations.
+type RouterLuaConfig struct {
+	RequestTransformation LuaScriptConfig `koanf:"request_transformation"`
+}
+
+// LuaScriptConfig holds Lua script path configuration.
+type LuaScriptConfig struct {
+	ScriptPath string `koanf:"script_path"`
 }
 
 // EventGatewayConfig holds event gateway specific configurations
 type EventGatewayConfig struct {
-	Enabled       bool   `koanf:"enabled"`
-	WebSubHubURL  string `koanf:"websub_hub_url"`
-	WebSubHubPort int    `koanf:"websub_hub_port"`
+	Enabled               bool   `koanf:"enabled"`
+	WebSubHubURL          string `koanf:"websub_hub_url"`
+	WebSubHubPort         int    `koanf:"websub_hub_port"`
+	RouterHost            string `koanf:"router_host"`
+	WebSubHubListenerPort int    `koanf:"websub_hub_listener_port"`
+	TimeoutSeconds        int    `koanf:"timeout_seconds"`
 }
 
 // DownstreamTLS holds downstream (listener) TLS configuration
@@ -247,6 +290,12 @@ type VHostEntry struct {
 	Default string   `koanf:"default"`
 }
 
+// HTTPListenerConfig holds HTTP listener related configuration of an API
+type HTTPListenerConfig struct {
+	ServerHeaderTransformation string `koanf:"server_header_transformation"` // Options: "APPEND_IF_ABSENT", "OVERWRITE", "PASS_THROUGH"
+	ServerHeaderValue          string `koanf:"server_header_value"`          // Custom value for the Server header
+}
+
 // PolicyEngineConfig holds policy engine ext_proc filter configuration
 type PolicyEngineConfig struct {
 	Enabled           bool            `koanf:"enabled"`
@@ -291,7 +340,7 @@ type GRPCAccessLogConfig struct {
 // LoggingConfig holds logging configuration
 type LoggingConfig struct {
 	Level  string `koanf:"level"`  // "debug", "info", "warn", "error"
-	Format string `koanf:"format"` // "json" or "console"
+	Format string `koanf:"format"` // "json" (default) or "text"
 }
 
 // ControlPlaneConfig holds control plane connection configuration
@@ -304,6 +353,14 @@ type ControlPlaneConfig struct {
 	InsecureSkipVerify bool          `koanf:"insecure_skip_verify"` // Skip TLS certificate verification (default: true for dev)
 }
 
+// APIKeyConfig represents the configuration for API keys
+type APIKeyConfig struct {
+	APIKeysPerUserPerAPI int    `koanf:"api_keys_per_user_per_api"` // Number of API keys allowed per user per API
+	Algorithm            string `koanf:"algorithm"`                 // Hashing algorithm to use
+	MinKeyLength         int    `koanf:"min_key_length"`            // Minimum length for external API key values
+	MaxKeyLength         int    `koanf:"max_key_length"`            // Maximum length for external API key values
+}
+
 // LoadConfig loads configuration from file, environment variables, and defaults
 // Priority: Environment variables > Config file > Defaults
 func LoadConfig(configPath string) (*Config, error) {
@@ -312,15 +369,13 @@ func LoadConfig(configPath string) (*Config, error) {
 	k := koanf.New(".")
 
 	// Load config file if path is provided
-	if err := k.Load(file.Provider(configPath), yaml.Parser()); err != nil {
+	if err := k.Load(file.Provider(configPath), toml.Parser()); err != nil {
 		return nil, fmt.Errorf("failed to load config file: %w", err)
 	}
 
-	// Load environment variables with prefix "GATEWAY_"
-	// Example: GATEWAY_SERVER_API_PORT=9090 -> server.api_port
-	//          GATEWAY_CONTROL_PLANE_URL=wss://... -> controlplane.url
-	if err := k.Load(env.Provider("GATEWAY_", ".", func(s string) string {
-		s = strings.TrimPrefix(s, "GATEWAY_")
+	// Load environment variables with prefix
+	if err := k.Load(env.Provider(EnvPrefix, ".", func(s string) string {
+		s = strings.TrimPrefix(s, EnvPrefix)
 		s = strings.ToLower(s)
 
 		// Custom mappings for control plane variables
@@ -351,8 +406,15 @@ func LoadConfig(configPath string) (*Config, error) {
 		return nil, fmt.Errorf("failed to load environment variables: %w", err)
 	}
 
-	// Unmarshal into Config struct
-	if err := k.Unmarshal("", cfg); err != nil {
+	// Unmarshal into Config struct with DecodeHook for duration strings
+	if err := k.UnmarshalWithConf("", cfg, koanf.UnmarshalConf{
+		DecoderConfig: &mapstructure.DecoderConfig{
+			TagName:          "koanf",
+			WeaklyTypedInput: true,
+			Result:           cfg,
+			DecodeHook:       mapstructure.StringToTimeDurationHookFunc(),
+		},
+	}); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal config: %w", err)
 	}
 
@@ -376,6 +438,11 @@ func defaultConfig() *Config {
 			PolicyServer: PolicyServerConfig{
 				Enabled: true,
 				Port:    18001,
+				TLS: PolicyServerTLS{
+					Enabled:  false,
+					CertFile: "./certs/server.crt",
+					KeyFile:  "./certs/server.key",
+				},
 			},
 			Policies: PoliciesConfig{
 				DefinitionsPath: "./default-policies",
@@ -384,16 +451,19 @@ func defaultConfig() *Config {
 				TemplateDefinitionsPath: "./default-llm-provider-templates",
 			},
 			Storage: StorageConfig{
-				Type: "memory",
+				Type: "sqlite",
 				SQLite: SQLiteConfig{
 					Path: "./data/gateway.db",
 				},
 			},
 			Router: RouterConfig{
 				EventGateway: EventGatewayConfig{
-					Enabled:       true,
-					WebSubHubURL:  "http://host.docker.internal",
-					WebSubHubPort: 9098,
+					Enabled:               false,
+					WebSubHubURL:          "http://host.docker.internal",
+					WebSubHubPort:         9098,
+					RouterHost:            "localhost",
+					WebSubHubListenerPort: 8083,
+					TimeoutSeconds:        30,
 				},
 				AccessLogs: AccessLogsConfig{
 					Enabled: true,
@@ -422,21 +492,30 @@ func defaultConfig() *Config {
 						"\"%REQ(X-FORWARDED-FOR)%\" \"%REQ(USER-AGENT)%\" \"%REQ(X-REQUEST-ID)%\" " +
 						"\"%REQ(:AUTHORITY)%\" \"%UPSTREAM_HOST%\"\n",
 				},
-				ListenerPort: 8080,
-				HTTPSEnabled: false,
-				HTTPSPort:    8443,
+				ListenerPort:  8080,
+				HTTPSEnabled:  true,
+				HTTPSPort:     8443,
+				Lua: RouterLuaConfig{
+					RequestTransformation: LuaScriptConfig{
+						ScriptPath: DefaultLuaScriptPath,
+					},
+				},
+				LuaScriptPath: DefaultLuaScriptPath,
 				DownstreamTLS: DownstreamTLS{
-					CertPath:               "./listener-certs/server.crt",
-					KeyPath:                "./listener-certs/server.key",
+					CertPath:               "./listener-certs/default-listener.crt",
+					KeyPath:                "./listener-certs/default-listener.key",
 					MinimumProtocolVersion: "TLS1_2",
 					MaximumProtocolVersion: "TLS1_3",
 					Ciphers:                "ECDHE-ECDSA-AES128-GCM-SHA256,ECDHE-RSA-AES128-GCM-SHA256,ECDHE-ECDSA-AES128-SHA,ECDHE-RSA-AES128-SHA,AES128-GCM-SHA256,AES128-SHA,ECDHE-ECDSA-AES256-GCM-SHA384,ECDHE-RSA-AES256-GCM-SHA384,ECDHE-ECDSA-AES256-SHA,ECDHE-RSA-AES256-SHA,AES256-GCM-SHA384,AES256-SHA",
 				},
-				GatewayHost: "localhost",
+				GatewayHost: "*",
 				Upstream: envoyUpstream{
 					TLS: upstreamTLS{
 						MinimumProtocolVersion: "TLS1_2",
 						MaximumProtocolVersion: "TLS1_3",
+						Ciphers:                "ECDHE-ECDSA-AES128-GCM-SHA256,ECDHE-RSA-AES128-GCM-SHA256,ECDHE-ECDSA-AES128-SHA,ECDHE-RSA-AES128-SHA,AES128-GCM-SHA256,AES128-SHA,ECDHE-ECDSA-AES256-GCM-SHA384,ECDHE-RSA-AES256-GCM-SHA384,ECDHE-ECDSA-AES256-SHA,ECDHE-RSA-AES256-SHA,AES256-GCM-SHA384,AES256-SHA",
+						TrustedCertPath:        "/etc/ssl/certs/ca-certificates.crt",
+						CustomCertsPath:        "./certificates",
 						VerifyHostName:         true,
 						DisableSslVerification: false,
 					},
@@ -447,15 +526,15 @@ func defaultConfig() *Config {
 					},
 				},
 				PolicyEngine: PolicyEngineConfig{
-					Enabled:           false,
-					Host:              "localhost",
+					Enabled:           true,
+					Host:              "policy-engine",
 					Port:              9001,
-					TimeoutMs:         250,
+					TimeoutMs:         60000,
 					FailureModeAllow:  false,
 					RouteCacheAction:  "RETAIN",
 					AllowModeOverride: true,
 					RequestHeaderMode: "SEND",
-					MessageTimeoutMs:  250,
+					MessageTimeoutMs:  60000,
 					TLS: PolicyEngineTLS{
 						Enabled:    false,
 						CertPath:   "",
@@ -470,6 +549,10 @@ func defaultConfig() *Config {
 					Sandbox: VHostEntry{Default: "sandbox-*"},
 				},
 				TracingServiceName: "router",
+				HTTPListener: HTTPListenerConfig{
+					ServerHeaderTransformation: commonconstants.OVERWRITE,
+					ServerHeaderValue:          commonconstants.ServerName,
+				},
 			},
 			Auth: AuthConfig{
 				Basic: BasicAuth{
@@ -500,6 +583,12 @@ func defaultConfig() *Config {
 				PollingInterval:    15 * time.Minute,
 				InsecureSkipVerify: true,
 			},
+			APIKey: APIKeyConfig{
+				APIKeysPerUserPerAPI: 10,
+				Algorithm:            constants.HashingAlgorithmSHA256,
+				MinKeyLength:         constants.DefaultMinAPIKeyLength,
+				MaxKeyLength:         constants.DefaultMaxAPIKeyLength,
+			},
 		},
 		Analytics: AnalyticsConfig{
 			Enabled:    false,
@@ -511,16 +600,16 @@ func defaultConfig() *Config {
 				BufferSizeBytes:     16384,
 				GRPCRequestTimeout:  20000000000,
 			},
-			AccessLogsServiceCfg: map[string]interface{}{
-				"enabled":          false,
-				"als_server_port":  18090,
-				"shutdown_timeout": 600,
-				"public_key_path":  "",
-				"private_key_path": "",
-				"als_plain_text":   true,
-				"max_message_size": 1000000000,
-				"max_header_limit": 8192,
+			AccessLogsServiceCfg: AccessLogsServiceConfig{
+				ALSServerPort:   18090,
+				ShutdownTimeout: 600 * time.Second,
+				PublicKeyPath:   "",
+				PrivateKeyPath:  "",
+				ALSPlainText:    true,
+				MaxMessageSize:  1000000000,
+				MaxHeaderLimit:  8192,
 			},
+			AllowPayloads: false,
 		},
 		TracingConfig: TracingConfig{
 			Enabled:            false,
@@ -596,8 +685,8 @@ func (c *Config) Validate() error {
 	}
 
 	// Validate log format
-	if c.GatewayController.Logging.Format != "json" && c.GatewayController.Logging.Format != "console" {
-		return fmt.Errorf("logging.format must be either 'json' or 'console', got: %s", c.GatewayController.Logging.Format)
+	if c.GatewayController.Logging.Format != "json" && c.GatewayController.Logging.Format != "text" {
+		return fmt.Errorf("logging.format must be either 'json' or 'text', got: %s", c.GatewayController.Logging.Format)
 	}
 
 	// Validate ports
@@ -630,6 +719,13 @@ func (c *Config) Validate() error {
 	if c.GatewayController.Router.HTTPSEnabled {
 		if c.GatewayController.Router.HTTPSPort < 1 || c.GatewayController.Router.HTTPSPort > 65535 {
 			return fmt.Errorf("router.https_port must be between 1 and 65535, got: %d", c.GatewayController.Router.HTTPSPort)
+		}
+	}
+
+	// Validate event gateway configuration if enabled
+	if c.GatewayController.Router.EventGateway.Enabled {
+		if err := c.validateEventGatewayConfig(); err != nil {
+			return err
 		}
 	}
 
@@ -667,6 +763,39 @@ func (c *Config) Validate() error {
 		return err
 	}
 
+	if err := c.validateHTTPListenerConfig(); err != nil {
+		return err
+	}
+
+	// Validate API key configuration
+	if err := c.validateAPIKeyConfig(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (c *Config) validateEventGatewayConfig() error {
+	if c.GatewayController.Router.EventGateway.WebSubHubPort < 1 || c.GatewayController.Router.EventGateway.WebSubHubPort > 65535 {
+		return fmt.Errorf("router.event_gateway.websub_hub_port must be between 1 and 65535, got: %d", c.GatewayController.Router.EventGateway.WebSubHubPort)
+	}
+	if c.GatewayController.Router.EventGateway.WebSubHubListenerPort < 1 || c.GatewayController.Router.EventGateway.WebSubHubListenerPort > 65535 {
+		return fmt.Errorf("router.event_gateway.websub_hub_listener_port must be between 1 and 65535, got: %d", c.GatewayController.Router.EventGateway.WebSubHubListenerPort)
+	}
+
+	// Validate WebSubHubURL if provided - must be a valid http(s) URL
+	if strings.TrimSpace(c.GatewayController.Router.EventGateway.WebSubHubURL) != "" {
+		u, err := url.Parse(c.GatewayController.Router.EventGateway.WebSubHubURL)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+			return fmt.Errorf("router.event_gateway.websub_hub_url must be a valid URL with http or https scheme, got: %s", c.GatewayController.Router.EventGateway.WebSubHubURL)
+		}
+		if u.Host == "" {
+			return fmt.Errorf("router.event_gateway.websub_hub_url must include a valid host, got: %s", c.GatewayController.Router.EventGateway.WebSubHubURL)
+		}
+	}
+	if c.GatewayController.Router.EventGateway.TimeoutSeconds <= 0 {
+		return fmt.Errorf("router.event_gateway.timeout_seconds must be positive, got: %d", c.GatewayController.Router.EventGateway.TimeoutSeconds)
+	}
 	return nil
 }
 
@@ -1055,15 +1184,7 @@ func (c *Config) validateAnalyticsConfig() error {
 	if c.Analytics.Enabled {
 		// Validate gRPC access log configuration
 		grpcAccessLogCfg := c.Analytics.GRPCAccessLogCfg
-		var alsServerPort int
-		switch v := c.Analytics.AccessLogsServiceCfg["als_server_port"].(type) {
-		case int:
-			alsServerPort = v
-		case float64:
-			alsServerPort = int(v)
-		default:
-			return fmt.Errorf("analytics.access_logs_service.als_server_port must be an integer between 1 and 65535")
-		}
+		alsServerPort := c.Analytics.AccessLogsServiceCfg.ALSServerPort
 		if alsServerPort <= 0 || alsServerPort > 65535 {
 			return fmt.Errorf("analytics.access_logs_service.als_server_port must be an integer between 1 and 65535, got %d", alsServerPort)
 		}
@@ -1113,6 +1234,52 @@ func (c *Config) validateAuthConfig() error {
 	return nil
 }
 
+// validateAPIKeyConfig validates the API key configuration
+func (c *Config) validateAPIKeyConfig() error {
+	// If number of api keys per user is not provided or negative throw error
+	if c.GatewayController.APIKey.APIKeysPerUserPerAPI <= 0 {
+		return fmt.Errorf("api_key.api_keys_per_user_per_api must be a positive integer, got: %d",
+			c.GatewayController.APIKey.APIKeysPerUserPerAPI)
+	}
+
+	// Default min/max key lengths if not configured
+	if c.GatewayController.APIKey.MinKeyLength <= 0 {
+		c.GatewayController.APIKey.MinKeyLength = constants.DefaultMinAPIKeyLength
+	}
+	if c.GatewayController.APIKey.MaxKeyLength <= 0 {
+		c.GatewayController.APIKey.MaxKeyLength = constants.DefaultMaxAPIKeyLength
+	}
+	if c.GatewayController.APIKey.MinKeyLength > c.GatewayController.APIKey.MaxKeyLength {
+		return fmt.Errorf("api_key.min_key_length (%d) must not exceed api_key.max_key_length (%d)",
+			c.GatewayController.APIKey.MinKeyLength, c.GatewayController.APIKey.MaxKeyLength)
+	}
+
+	// If hashing is enabled but no algorithm is provided, default to SHA256
+	if c.GatewayController.APIKey.Algorithm == "" {
+		c.GatewayController.APIKey.Algorithm = constants.HashingAlgorithmSHA256
+		return nil
+	}
+
+	// If hashing is enabled and algorithm is provided, validate it's one of the supported ones
+	validAlgorithms := []string{
+		constants.HashingAlgorithmSHA256,
+		constants.HashingAlgorithmBcrypt,
+		constants.HashingAlgorithmArgon2ID,
+	}
+	isValidAlgorithm := false
+	for _, alg := range validAlgorithms {
+		if strings.ToLower(c.GatewayController.APIKey.Algorithm) == alg {
+			isValidAlgorithm = true
+			break
+		}
+	}
+	if !isValidAlgorithm {
+		return fmt.Errorf("api_key.algorithm must be one of: %s, got: %s",
+			strings.Join(validAlgorithms, ", "), c.GatewayController.APIKey.Algorithm)
+	}
+	return nil
+}
+
 // IsPersistentMode returns true if storage type is not memory
 func (c *Config) IsPersistentMode() bool {
 	return c.GatewayController.Storage.Type != "memory"
@@ -1131,4 +1298,39 @@ func (c *Config) IsAccessLogsEnabled() bool {
 // IsPolicyEngineEnabled returns true if policy engine is enabled
 func (c *Config) IsPolicyEngineEnabled() bool {
 	return c.GatewayController.Router.PolicyEngine.Enabled
+}
+
+// validateHTTPListenerConfig validates the HTTP listener configuration
+func (c *Config) validateHTTPListenerConfig() error {
+	httpListener := &c.GatewayController.Router.HTTPListener
+
+	// Set default values if not provided
+	if httpListener.ServerHeaderTransformation == "" {
+		httpListener.ServerHeaderTransformation = commonconstants.OVERWRITE
+	}
+
+	// Validate ServerHeaderTransformation value
+	validTransformations := []string{
+		commonconstants.APPEND_IF_ABSENT,
+		commonconstants.OVERWRITE,
+		commonconstants.PASS_THROUGH,
+	}
+
+	isValid := false
+	for _, valid := range validTransformations {
+		if httpListener.ServerHeaderTransformation == valid {
+			isValid = true
+			break
+		}
+	}
+
+	if !isValid {
+		return fmt.Errorf("http_listener.server_header_transformation must be one of: %s, %s, %s. Got: %s",
+			commonconstants.APPEND_IF_ABSENT,
+			commonconstants.OVERWRITE,
+			commonconstants.PASS_THROUGH,
+			httpListener.ServerHeaderTransformation)
+	}
+
+	return nil
 }

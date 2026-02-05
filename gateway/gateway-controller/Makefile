@@ -41,34 +41,9 @@ generate: ## Generate API server code from OpenAPI spec
 	@go run github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@v2.5.1 --config=oapi-codegen.yaml api/openapi.yaml
 test: ## Run unit and integration tests
 	@echo "Running tests..."
-	@go test -v ./... -cover
+	@go test -v ./... -cover -coverprofile=unit-test-coverage.txt
 
-copy-policy-definitions: ## Copy policy definitions from policy-manifest.yaml
-	@# Check if yq is installed
-	@if ! command -v yq >/dev/null 2>&1; then \
-		echo "yq is not installed. Please install yq before running this target."; \
-		echo "  MacOS: brew install yq"; \
-		echo "  Linux: sudo wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq && sudo chmod +x /usr/local/bin/yq"; \
-		exit 1; \
-	fi
-	@echo "Copying policy definitions..."
-	@mkdir -p policies
-	@yq e '.policies[] | .name + "|" + .version + "|" + .filePath' ../policies/policy-manifest-lock.yaml | \
-	while IFS= read -r line; do \
-		name=$$(echo "$$line" | cut -d'|' -f1); \
-		version=$$(echo "$$line" | cut -d'|' -f2); \
-		filepath=$$(echo "$$line" | cut -d'|' -f3); \
-		src="../policies/$${filepath#./}/policy-definition.yaml"; \
-		dest="default-policies/$${name}-$${version}.yaml"; \
-		if [ -f "$$src" ]; then \
-			cp "$$src" "$$dest"; \
-			echo "  Copied $$src -> $$dest"; \
-		else \
-			echo "  Warning: $$src not found"; \
-		fi; \
-	done
-
-build: generate copy-policy-definitions test ## Build Docker image using buildx
+build: generate test ## Build Docker image using buildx
 	@echo "Building Docker image ($(IMAGE_NAME):$(VERSION))..."
 	docker buildx build -f Dockerfile \
 		--build-context sdk=../../sdk \
@@ -80,7 +55,7 @@ build: generate copy-policy-definitions test ## Build Docker image using buildx
 		--load \
 		.
 
-build-local: generate copy-policy-definitions ## Build Docker image locally (faster, no buildx)
+build-local: generate ## Build Docker image locally (faster, no buildx)
 	@echo "Building Docker image locally ($(IMAGE_NAME):$(VERSION))..."
 	DOCKER_BUILDKIT=1 docker build -f Dockerfile \
 		--build-context sdk=../../sdk \
@@ -110,11 +85,12 @@ build-and-push-multiarch: ## Build and push multi-architecture Docker image (lin
 		.
 
 build-coverage-image: test ## Build coverage-instrumented gateway-controller image
-	docker buildx build -f Dockerfile.coverage \
+	docker buildx build -f Dockerfile \
 		--build-context sdk=../../sdk \
 		--build-context common=../../common \
 		--build-arg VERSION=$(VERSION) \
 		--build-arg GIT_COMMIT=$(GIT_COMMIT) \
+		--build-arg ENABLE_COVERAGE=true \
 		-t $(IMAGE_NAME)-coverage:$(VERSION) \
 		--load \
 		.

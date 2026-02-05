@@ -70,6 +70,7 @@ const (
 	// External Processor (ext_proc) Filter
 	ExtProcFilterName                    = "api_platform.policy_engine.envoy.filters.http.ext_proc"
 	ExtProcConfigType                    = "type.googleapis.com/envoy.extensions.filters.http.ext_proc.v3.ExternalProcessor"
+	ExtProcMetadataNamespace             = ExtProcFilterName
 	ExtProcRouteCacheActionDefault       = "DEFAULT"
 	ExtProcRouteCacheActionRetain        = "RETAIN"
 	ExtProcRouteCacheActionClear         = "CLEAR"
@@ -95,6 +96,14 @@ const (
 	BASE_PATH = "/"
 	WILD_CARD = "*"
 
+	WEBSUBHUB_INTERNAL_CLUSTER_NAME = "WEBSUBHUB_INTERNAL_CLUSTER"
+
+	WEBSUB_PATH                    = "/hub"
+	WEBSUB_HUB_INTERNAL_HTTP_PORT  = 8083
+	WEBSUB_HUB_INTERNAL_HTTPS_PORT = 8446
+	WEBSUB_HUB_DYNAMIC_HTTP_PORT   = 8082
+	WEBSUB_HUB_DYNAMIC_HTTPS_PORT  = 8445
+
 	// LLM Transformer constants
 	UPSTREAM_AUTH_APIKEY_POLICY_NAME    = "modify-headers"
 	UPSTREAM_AUTH_APIKEY_POLICY_VERSION = "v0.1.0"
@@ -102,7 +111,7 @@ const (
 		"  - action: SET\n" +
 		"    name: '%s'\n" +
 		"    value: '%s'\n"
-	PROXY_HOST__HEADER_POLICY_NAME    = "modify-Headers"
+	PROXY_HOST__HEADER_POLICY_NAME    = "modify-headers"
 	PROXY_HOST__HEADER_POLICY_VERSION = "v0.1.0"
 	PROXY_HOST__HEADER_POLICY_PARAMS  = "requestHeaders:\n" +
 		"  - action: SET\n" +
@@ -124,6 +133,25 @@ const (
 		"  - action: SET\n" +
 		"    name: '%s'\n" +
 		"    value: '%s'\n"
+
+	// API Key constants
+	APIKeyPrefix    = "apip_"
+	APIKeyLen       = 32 // Length of the random part of the API key in bytes
+	APIKeySeparator = "_"
+
+	// API Key length constants
+	DefaultMinAPIKeyLength = 36
+	DefaultMaxAPIKeyLength = 128
+
+	// API Key name and display name length constants
+	APIKeyNameMinLength  = 3
+	APIKeyNameMaxLength  = 63
+	DisplayNameMaxLength = 100
+
+	// HashingAlgorithm constants
+	HashingAlgorithmSHA256   = "sha256"
+	HashingAlgorithmBcrypt   = "bcrypt"
+	HashingAlgorithmArgon2ID = "argon2id"
 
 	// System policy constants
 	ANALYTICS_SYSTEM_POLICY_NAME    = "wso2_apip_sys_analytics"

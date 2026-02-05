@@ -45,6 +45,9 @@ var (
 	// assertSteps provides common assertion steps
 	assertSteps *steps.AssertSteps
 
+	// jwtSteps provides JWT authentication steps
+	jwtSteps *JWTSteps
+
 	// coverageCollector manages coverage data collection
 	coverageCollector *CoverageCollector
 
@@ -70,10 +73,44 @@ func TestFeatures(t *testing.T) {
 			Format: "pretty",
 			Paths: []string{
 				"features/health.feature",
+				"features/metrics.feature",
 				"features/api_deploy.feature",
 				"features/mcp_deploy.feature",
 				"features/ratelimit.feature",
-				"features/basic-ratelimit.feature",
+				"features/jwt-auth.feature",
+				"features/cors.feature",
+				"features/word-count-guardrail.feature",
+				"features/sentence-count-guardrail.feature",
+				"features/url-guardrail.feature",
+				"features/regex-guardrail.feature",
+				"features/prompt-decorator.feature",
+				"features/prompt-template.feature",
+				"features/pii-masking-regex.feature",
+				"features/model-weighted-round-robin.feature",
+				"features/model-round-robin.feature",
+				"features/json-schema-guardrail.feature",
+				"features/llm-provider-templates.feature",
+				"features/analytics-header-filter.feature",
+				"features/lazy-resources-xds.feature",
+				"features/content-length-guardrail.feature",
+				"features/azure-content-safety.feature",
+				"features/aws-bedrock-guardrail.feature",
+				"features/semantic-cache.feature",
+				"features/semantic-prompt-guard.feature",
+				"features/modify-headers.feature",
+				"features/respond.feature",
+				"features/llm-provider.feature",
+				"features/certificates.feature",
+				"features/config-dump.feature",
+				"features/api-management.feature",
+				"features/list-policies.feature",
+				"features/api-keys.feature",
+				"features/api-with-policies.feature",
+				"features/llm-proxies.feature",
+				"features/search-deployments.feature",
+				"features/policy-engine-admin.feature",
+				"features/cel-conditions.feature",
+				"features/analytics-basic.feature",
 			},
 			TestingT: t,
 		},
@@ -125,13 +162,20 @@ func InitializeTestSuite(ctx *godog.TestSuiteContext) {
 
 		// Initialize common step handlers
 		httpSteps = steps.NewHTTPSteps(testState.HTTPClient, map[string]string{
-			"gateway-controller": testState.Config.GatewayControllerURL,
-			"router":             testState.Config.RouterURL,
-			"policy-engine":      testState.Config.PolicyEngineURL,
-			"sample-backend":     testState.Config.SampleBackendURL,
-			"echo-backend":       testState.Config.EchoBackendURL,
+			"gateway-controller":         testState.Config.GatewayControllerURL,
+			"router":                     testState.Config.RouterURL,
+			"policy-engine":              testState.Config.PolicyEngineURL,
+			"sample-backend":             testState.Config.SampleBackendURL,
+			"echo-backend":               testState.Config.EchoBackendURL,
+			"mock-jwks":                  testState.Config.MockJWKSURL,
+			"mock-azure-content-safety":  testState.Config.MockAzureContentSafetyURL,
+			"mock-aws-bedrock-guardrail": testState.Config.MockAWSBedrockGuardrailURL,
+			"mock-embedding-provider":    testState.Config.MockEmbeddingProviderURL,
 		})
 		assertSteps = steps.NewAssertSteps(httpSteps)
+
+		// Initialize JWT steps
+		jwtSteps = NewJWTSteps(testState, httpSteps, testState.Config.MockJWKSURL)
 
 		log.Println("=== Test Suite Ready ===")
 	})
@@ -193,6 +237,9 @@ func InitializeScenario(ctx *godog.ScenarioContext) {
 		if httpSteps != nil {
 			httpSteps.Reset()
 		}
+		if jwtSteps != nil {
+			jwtSteps.Reset()
+		}
 		// Record scenario start for reporting
 		if testReporter != nil {
 			testReporter.StartScenario(sc)
@@ -218,9 +265,14 @@ func InitializeScenario(ctx *godog.ScenarioContext) {
 	// Register step definitions
 	if testState != nil {
 		RegisterHealthSteps(ctx, testState, httpSteps)
+		RegisterMetricsSteps(ctx, testState, httpSteps)
 		RegisterAuthSteps(ctx, testState, httpSteps)
 		RegisterAPISteps(ctx, testState, httpSteps)
 		RegisterMCPSteps(ctx, testState, httpSteps)
+		RegisterLLMSteps(ctx, testState, httpSteps)
+		RegisterJWTSteps(ctx, testState, httpSteps, jwtSteps)
+		RegisterPolicyEngineSteps(ctx, testState, httpSteps)
+		RegisterAnalyticsSteps(ctx, testState, httpSteps)
 	}
 
 	// Register common HTTP and assertion steps

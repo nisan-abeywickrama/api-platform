@@ -19,16 +19,16 @@
 SHELL := /bin/bash
 
 # Version files
-ROOT_VERSION := $(shell cat VERSION 2>/dev/null || echo "0.0.1-SNAPSHOT")
-GATEWAY_VERSION := $(shell cat gateway/VERSION 2>/dev/null || echo "0.0.1-SNAPSHOT")
-PLATFORM_API_VERSION := $(shell cat platform-api/VERSION 2>/dev/null || echo "0.0.1-SNAPSHOT")
+ROOT_VERSION := $(shell cat VERSION)
+GATEWAY_VERSION := $(shell cat gateway/VERSION)
+PLATFORM_API_VERSION := $(shell cat platform-api/VERSION)
+CLI_VERSION := $(shell cat cli/VERSION)
 
 # Docker registry configuration
 DOCKER_REGISTRY ?= ghcr.io/wso2/api-platform
 
 # Component names
 COMPONENT ?=
-VERSION_ARG ?=
 
 .DEFAULT_GOAL := help
 
@@ -38,24 +38,19 @@ help: ## Show this help message
 	@echo ''
 	@echo 'Version Management:'
 	@echo '  make version                          - Show all component versions'
-	@echo '  make version-set COMPONENT=X VERSION=Y - Set component version'
-	@echo '  make version-bump-patch COMPONENT=X   - Bump patch version'
-	@echo '  make version-bump-minor COMPONENT=X   - Bump minor version'
-	@echo '  make version-bump-major COMPONENT=X   - Bump major version'
-	@echo '  make version-bump-next-dev COMPONENT=X - Bump to next minor dev version with SNAPSHOT'
+	@echo '  cd <component> && make help           - See component-specific version commands'
 	@echo ''
 	@echo 'Build Targets:'
 	@echo '  make build-gateway                    - Build all gateway Docker images'
 	@echo '  make build-and-push-gateway-multiarch - Build and push all gateway images for multiple architectures'
 	@echo '  make build-and-push-platform-api-multiarch VERSION=X - Build and push platform-api images for multiple architectures'
+	@echo '  make build-cli                        - Build CLI binaries for all platforms'
 	@echo '  make test-gateway                     - Run gateway tests'
 	@echo '  make test-platform-api                - Run platform-api tests'
+	@echo '  make test-cli                         - Run CLI tests'
 	@echo ''
 	@echo 'Push Targets:'
 	@echo '  make push-gateway                     - Push gateway images to registry'
-	@echo ''
-	@echo 'Release Targets:'
-	@echo '  make release-gateway VERSION=X        - Release gateway components'
 	@echo ''
 	@echo 'Utility Targets:'
 	@echo '  make update-images COMPONENT=X VERSION=Y - Update docker-compose and Helm images'
@@ -68,65 +63,8 @@ version: ## Display current versions
 	@echo "Platform Version:     $(ROOT_VERSION)"
 	@echo "Gateway Version:      $(GATEWAY_VERSION)"
 	@echo "Platform API Version: $(PLATFORM_API_VERSION)"
+	@echo "CLI Version:          $(CLI_VERSION)"
 
-.PHONY: version-set
-version-set: ## Set specific version for a component
-	@if [ -z "$(COMPONENT)" ] || [ -z "$(VERSION_ARG)" ]; then \
-		echo "Error: COMPONENT and VERSION_ARG required"; \
-		echo "Usage: make version-set COMPONENT=gateway VERSION_ARG=1.2.0"; \
-		exit 1; \
-	fi
-	@if [ "$(COMPONENT)" = "root" ]; then \
-		echo "$(VERSION_ARG)" > VERSION; \
-		echo " Set root version to $(VERSION_ARG)"; \
-	elif [ "$(COMPONENT)" = "gateway" ]; then \
-		echo "$(VERSION_ARG)" > gateway/VERSION; \
-		$(MAKE) update-images COMPONENT=gateway VERSION_ARG=$(VERSION_ARG) >/dev/null; \
-		echo " Set gateway version to $(VERSION_ARG)"; \
-	elif [ "$(COMPONENT)" = "platform-api" ]; then \
-		echo "$(VERSION_ARG)" > platform-api/VERSION; \
-		echo " Set platform-api version to $(VERSION_ARG)"; \
-	else \
-		echo "Error: Unknown component: $(COMPONENT)"; \
-		echo "Valid components: root, gateway, platform-api"; \
-		exit 1; \
-	fi
-
-.PHONY: version-bump-patch
-version-bump-patch: ## Bump patch version
-	@if [ -z "$(COMPONENT)" ]; then \
-		echo "Error: COMPONENT required"; \
-		echo "Usage: make version-bump-patch COMPONENT=gateway"; \
-		exit 1; \
-	fi
-	@bash scripts/version-bump.sh patch $(COMPONENT)
-
-.PHONY: version-bump-minor
-version-bump-minor: ## Bump minor version
-	@if [ -z "$(COMPONENT)" ]; then \
-		echo "Error: COMPONENT required"; \
-		echo "Usage: make version-bump-minor COMPONENT=gateway"; \
-		exit 1; \
-	fi
-	@bash scripts/version-bump.sh minor $(COMPONENT)
-
-.PHONY: version-bump-major
-version-bump-major: ## Bump major version
-	@if [ -z "$(COMPONENT)" ]; then \
-		echo "Error: COMPONENT required"; \
-		echo "Usage: make version-bump-major COMPONENT=gateway"; \
-		exit 1; \
-	fi
-	@bash scripts/version-bump.sh major $(COMPONENT)
-
-.PHONY: version-bump-next-dev
-version-bump-next-dev: ## Bump to next minor dev version with SNAPSHOT suffix
-	@if [ -z "$(COMPONENT)" ]; then \
-		echo "Error: COMPONENT required"; \
-		echo "Usage: make version-bump-next-dev COMPONENT=gateway"; \
-		exit 1; \
-	fi
-	@bash scripts/version-bump.sh next-dev $(COMPONENT)
 
 # Build Targets
 .PHONY: build-gateway
@@ -158,38 +96,39 @@ test-platform-api: ## Run platform-api tests
 	@echo "Running platform-api tests..."
 	$(MAKE) -C platform-api test
 
+.PHONY: build-cli
+build-cli: ## Build CLI binaries for all platforms
+	@echo "Building CLI ($(CLI_VERSION))..."
+	$(MAKE) -C cli/src build-all
+	@echo "Successfully built CLI binaries"
+
+.PHONY: test-cli
+test-cli: ## Run CLI tests
+	@echo "Running CLI tests..."
+	$(MAKE) -C cli/src test
+
 # Push Targets
 .PHONY: push-gateway
 push-gateway: ## Push gateway images to registry
 	@echo "Pushing gateway images to registry..."
 	$(MAKE) -C gateway push
 
-# Release Targets
-.PHONY: release-gateway
-release-gateway: ## Release gateway components
-	@if [ -z "$(VERSION_ARG)" ]; then \
-		echo "Error: VERSION_ARG required"; \
-		echo "Usage: make release-gateway VERSION_ARG=1.0.0"; \
-		exit 1; \
-	fi
-	@bash scripts/release.sh gateway $(VERSION_ARG)
-
 # Update Targets
 .PHONY: update-images
 update-images: ## Update docker-compose and Helm chart images
-	@if [ -z "$(COMPONENT)" ] || [ -z "$(VERSION_ARG)" ]; then \
-		echo "Error: COMPONENT and VERSION_ARG required"; \
-		echo "Usage: make update-images COMPONENT=gateway VERSION_ARG=1.0.0"; \
+	@if [ -z "$(COMPONENT)" ] || [ -z "$(VERSION)" ]; then \
+		echo "Error: COMPONENT and VERSION required"; \
+		echo "Usage: make update-images COMPONENT=gateway VERSION=1.0.0"; \
 		exit 1; \
 	fi
 	@echo "Updating docker-compose and Helm charts..."
-	@bash scripts/update-docker-compose.sh $(COMPONENT) $(VERSION_ARG)
-	@bash scripts/update-helm.sh $(COMPONENT) $(VERSION_ARG)
-	@echo "✅ Updated all image references to version $(VERSION_ARG)"
+	@bash scripts/update-docker-compose.sh $(COMPONENT) $(VERSION)
+	@bash scripts/update-helm.sh $(COMPONENT) $(VERSION)
+	@echo "Updated all image references to version $(VERSION)"
 
 .PHONY: update-versions
 update-versions: ## Update docker-compose and Helm charts (alias for update-images)
-	@$(MAKE) update-images COMPONENT=$(COMPONENT) VERSION_ARG=$(VERSION_ARG)
+	@$(MAKE) update-images COMPONENT=$(COMPONENT) VERSION=$(VERSION)
 
 # Validation Targets
 .PHONY: validate-versions

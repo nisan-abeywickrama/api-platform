@@ -61,6 +61,7 @@ build: ## Build Docker image using buildx
 		--build-context policy-engine=../policy-engine \
 		--build-context system-policies=../system-policies \
 		--build-context sdk=../../sdk \
+		--build-context common=../../common \
 		--build-arg VERSION=$(VERSION) \
 		--build-arg GIT_COMMIT=$(GIT_COMMIT) \
 		-t $(IMAGE_NAME):$(VERSION) \
@@ -75,6 +76,7 @@ build-local: ## Build Docker image locally (faster, no buildx)
 		--build-context policy-engine=../policy-engine \
 		--build-context system-policies=../system-policies \
 		--build-context sdk=../../sdk \
+		--build-context common=../../common \
 		--build-arg VERSION=$(VERSION) \
 		--build-arg GIT_COMMIT=$(GIT_COMMIT) \
 		-t $(IMAGE_NAME):$(VERSION) \
@@ -94,6 +96,7 @@ build-and-push-multiarch: ## Build and push multi-architecture Docker image (lin
 		--build-context policy-engine=../policy-engine \
 		--build-context system-policies=../system-policies \
 		--build-context sdk=../../sdk \
+		--build-context common=../../common \
 		--platform linux/amd64,linux/arm64 \
 		--build-arg VERSION=$(VERSION) \
 		--build-arg GIT_COMMIT=$(GIT_COMMIT) \
@@ -106,7 +109,7 @@ build-and-push-multiarch: ## Build and push multi-architecture Docker image (lin
 .PHONY: test
 test: ## Run tests
 	@echo "Running tests..."
-	@go test -v ./... -cover
+	@go test -v ./... -cover -coverprofile=unit-test-coverage.txt
 
 .PHONY: tidy
 tidy: ## Run go mod tidy

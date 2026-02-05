@@ -19,22 +19,64 @@
 package it
 
 import (
+	"time"
+
 	"github.com/cucumber/godog"
 	"github.com/wso2/api-platform/gateway/it/steps"
 )
 
+// policyPropagationDelay is the time to wait after mutating operations
+// to allow the Policy Engine to receive and apply configuration changes.
+// Reduced from 2s to 500ms as xDS sync typically completes in <500ms.
+const policyPropagationDelay = 500 * time.Millisecond
+
 // RegisterAPISteps registers all API deployment step definitions
 func RegisterAPISteps(ctx *godog.ScenarioContext, state *TestState, httpSteps *steps.HTTPSteps) {
-	ctx.Step(`^I deploy this API configuration:$`, func(body *godog.DocString) error {
+	// Single deploy function used by multiple step patterns
+	deployAPI := func(body *godog.DocString) error {
 		httpSteps.SetHeader("Content-Type", "application/yaml")
-		return httpSteps.SendPOSTToService("gateway-controller", "/apis", body)
+		err := httpSteps.SendPOSTToService("gateway-controller", "/apis", body)
+		if err != nil {
+			return err
+		}
+		time.Sleep(policyPropagationDelay)
+		return nil
+	}
+
+	// Single delete function used by multiple step patterns
+	deleteAPI := func(name string) error {
+		err := httpSteps.SendDELETEToService("gateway-controller", "/apis/"+name)
+		if err != nil {
+			return err
+		}
+		time.Sleep(policyPropagationDelay)
+		return nil
+	}
+
+	// Register multiple step patterns for deploy
+	ctx.Step(`^I deploy this API configuration:$`, deployAPI)
+	ctx.Step(`^I deploy an API with the following configuration:$`, deployAPI)
+	ctx.Step(`^I deploy a test API with the following configuration:$`, deployAPI)
+
+	// Register multiple step patterns for delete
+	ctx.Step(`^I delete the API "([^"]*)"$`, deleteAPI)
+	// Note: Version parameter is semantically meaningful in tests but not used by the API endpoint.
+	// The API deletes by name only - version is embedded in the API YAML, not in the DELETE path.
+	ctx.Step(`^I delete the API "([^"]*)" version "([^"]*)"$`, func(name, version string) error {
+		return deleteAPI(name)
 	})
 
-	ctx.Step(`^I delete the API "([^"]*)"$`, func(name string) error {
-		return httpSteps.SendDELETEToService("gateway-controller", "/apis/"+name)
-	})
 	ctx.Step(`^I update the API "([^"]*)" with this configuration:$`, func(apiName string, body *godog.DocString) error {
 		httpSteps.SetHeader("Content-Type", "application/yaml")
-		return httpSteps.SendPUTToService("gateway-controller", "/apis/"+apiName, body)
+		err := httpSteps.SendPUTToService("gateway-controller", "/apis/"+apiName, body)
+		if err != nil {
+			return err
+		}
+		time.Sleep(policyPropagationDelay)
+		return nil
+	})
+
+	ctx.Step(`^I get the API "([^"]*)"$`, func(name string) error {
+		return httpSteps.SendGETToService("gateway-controller", "/apis/"+name)
 	})
 }

@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"time"
 
+	"platform-api/src/internal/constants"
 	"platform-api/src/internal/database"
 	"platform-api/src/internal/model"
 
@@ -59,21 +60,24 @@ func (r *APIRepo) CreateAPI(api *model.API) error {
 
 	// Convert transport slice to JSON
 	transportJSON, _ := json.Marshal(api.Transport)
+	policiesJSON, err := serializePolicies(api.Policies)
+	if err != nil {
+		return err
+	}
 
 	// Insert main API record
 	apiQuery := `
 		INSERT INTO apis (uuid, handle, name, description, context, version, provider,
-			project_uuid, organization_uuid, lifecycle_status, has_thumbnail, is_default_version, is_revision,
-			revisioned_api_id, revision_id, type, transport, security_enabled, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			project_uuid, organization_uuid, lifecycle_status, has_thumbnail, is_default_version,
+			type, transport, policies, security_enabled, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 
 	securityEnabled := api.Security != nil && api.Security.Enabled
 
-	_, err = tx.Exec(apiQuery, api.ID, api.Handle, api.Name, api.Description,
+	_, err = tx.Exec(r.db.Rebind(apiQuery), api.ID, api.Handle, api.Name, api.Description,
 		api.Context, api.Version, api.Provider, api.ProjectID, api.OrganizationID, api.LifeCycleStatus,
-		api.HasThumbnail, api.IsDefaultVersion, api.IsRevision, api.RevisionedAPIID,
-		api.RevisionID, api.Type, string(transportJSON), securityEnabled, api.CreatedAt, api.UpdatedAt)
+		api.HasThumbnail, api.IsDefaultVersion, api.Type, string(transportJSON), policiesJSON, securityEnabled, api.CreatedAt, api.UpdatedAt)
 	if err != nil {
 		return err
 	}
@@ -113,6 +117,13 @@ func (r *APIRepo) CreateAPI(api *model.API) error {
 		}
 	}
 
+	// Insert Channels
+	for _, channel := range api.Channels {
+		if err := r.insertChannel(tx, api.ID, &channel); err != nil {
+			return err
+		}
+	}
+
 	return tx.Commit()
 }
 
@@ -122,18 +133,18 @@ func (r *APIRepo) GetAPIByUUID(apiUUID, orgUUID string) (*model.API, error) {
 
 	query := `
 		SELECT uuid, handle, name, description, context, version, provider,
-			project_uuid, organization_uuid, lifecycle_status, has_thumbnail, is_default_version, is_revision,
-			revisioned_api_id, revision_id, type, transport, security_enabled, created_at, updated_at
+			project_uuid, organization_uuid, lifecycle_status, has_thumbnail, is_default_version,
+			type, transport, policies, security_enabled, created_at, updated_at
 		FROM apis WHERE uuid = ? and organization_uuid = ?
 	`
 
 	var transportJSON string
+	var policiesJSON sql.NullString
 	var securityEnabled bool
-	err := r.db.QueryRow(query, apiUUID, orgUUID).Scan(
+	err := r.db.QueryRow(r.db.Rebind(query), apiUUID, orgUUID).Scan(
 		&api.ID, &api.Handle, &api.Name, &api.Description, &api.Context,
 		&api.Version, &api.Provider, &api.ProjectID, &api.OrganizationID, &api.LifeCycleStatus,
-		&api.HasThumbnail, &api.IsDefaultVersion, &api.IsRevision,
-		&api.RevisionedAPIID, &api.RevisionID, &api.Type, &transportJSON,
+		&api.HasThumbnail, &api.IsDefaultVersion, &api.Type, &transportJSON, &policiesJSON,
 		&securityEnabled, &api.CreatedAt, &api.UpdatedAt)
 
 	if err != nil {
@@ -146,6 +157,11 @@ func (r *APIRepo) GetAPIByUUID(apiUUID, orgUUID string) (*model.API, error) {
 	// Parse transport JSON
 	if transportJSON != "" {
 		json.Unmarshal([]byte(transportJSON), &api.Transport)
+	}
+	if policies, err := deserializePolicies(policiesJSON); err != nil {
+		return nil, err
+	} else {
+		api.Policies = policies
 	}
 
 	// Load related configurations
@@ -162,7 +178,7 @@ func (r *APIRepo) GetAPIMetadataByHandle(handle, orgUUID string) (*model.APIMeta
 
 	query := `SELECT uuid, handle, name, context, organization_uuid FROM apis WHERE handle = ? AND organization_uuid = ?`
 
-	err := r.db.QueryRow(query, handle, orgUUID).Scan(
+	err := r.db.QueryRow(r.db.Rebind(query), handle, orgUUID).Scan(
 		&metadata.ID, &metadata.Handle, &metadata.Name, &metadata.Context, &metadata.OrganizationID)
 
 	if err != nil {
@@ -179,12 +195,12 @@ func (r *APIRepo) GetAPIMetadataByHandle(handle, orgUUID string) (*model.APIMeta
 func (r *APIRepo) GetAPIsByProjectUUID(projectUUID, orgUUID string) ([]*model.API, error) {
 	query := `
 		SELECT uuid, handle, name, description, context, version, provider,
-			project_uuid, organization_uuid, lifecycle_status, has_thumbnail, is_default_version, is_revision,
-			revisioned_api_id, revision_id, type, transport, security_enabled, created_at, updated_at
+			project_uuid, organization_uuid, lifecycle_status, has_thumbnail, is_default_version,
+			type, transport, policies, security_enabled, created_at, updated_at
 		FROM apis WHERE project_uuid = ? AND organization_uuid = ? ORDER BY created_at DESC
 	`
 
-	rows, err := r.db.Query(query, projectUUID, orgUUID)
+	rows, err := r.db.Query(r.db.Rebind(query), projectUUID, orgUUID)
 	if err != nil {
 		return nil, err
 	}
@@ -194,13 +210,13 @@ func (r *APIRepo) GetAPIsByProjectUUID(projectUUID, orgUUID string) ([]*model.AP
 	for rows.Next() {
 		api := &model.API{}
 		var transportJSON string
+		var policiesJSON sql.NullString
 		var securityEnabled bool
 
 		err := rows.Scan(&api.ID, &api.Handle, &api.Name, &api.Description,
 			&api.Context, &api.Version, &api.Provider, &api.ProjectID, &api.OrganizationID,
 			&api.LifeCycleStatus, &api.HasThumbnail, &api.IsDefaultVersion,
-			&api.IsRevision, &api.RevisionedAPIID, &api.RevisionID, &api.Type,
-			&transportJSON, &securityEnabled, &api.CreatedAt, &api.UpdatedAt)
+			&api.Type, &transportJSON, &policiesJSON, &securityEnabled, &api.CreatedAt, &api.UpdatedAt)
 		if err != nil {
 			return nil, err
 		}
@@ -208,6 +224,11 @@ func (r *APIRepo) GetAPIsByProjectUUID(projectUUID, orgUUID string) ([]*model.AP
 		// Parse transport JSON
 		if transportJSON != "" {
 			json.Unmarshal([]byte(transportJSON), &api.Transport)
+		}
+		if policies, err := deserializePolicies(policiesJSON); err != nil {
+			return nil, err
+		} else {
+			api.Policies = policies
 		}
 
 		// Load related configurations
@@ -230,8 +251,8 @@ func (r *APIRepo) GetAPIsByOrganizationUUID(orgUUID string, projectUUID *string)
 		// Filter by specific project within the organization
 		query = `
 			SELECT uuid, handle, name, description, context, version, provider,
-				project_uuid, organization_uuid, lifecycle_status, has_thumbnail, is_default_version, is_revision,
-				revisioned_api_id, revision_id, type, transport, security_enabled, created_at, updated_at
+				project_uuid, organization_uuid, lifecycle_status, has_thumbnail, is_default_version,
+				type, transport, policies, security_enabled, created_at, updated_at
 			FROM apis
 			WHERE organization_uuid = ? AND project_uuid = ?
 			ORDER BY created_at DESC
@@ -241,8 +262,8 @@ func (r *APIRepo) GetAPIsByOrganizationUUID(orgUUID string, projectUUID *string)
 		// Get all APIs for the organization
 		query = `
 			SELECT uuid, handle, name, description, context, version, provider,
-				project_uuid, organization_uuid, lifecycle_status, has_thumbnail, is_default_version, is_revision,
-				revisioned_api_id, revision_id, type, transport, security_enabled, created_at, updated_at
+				project_uuid, organization_uuid, lifecycle_status, has_thumbnail, is_default_version,
+				type, transport, policies, security_enabled, created_at, updated_at
 			FROM apis
 			WHERE organization_uuid = ?
 			ORDER BY created_at DESC
@@ -250,7 +271,7 @@ func (r *APIRepo) GetAPIsByOrganizationUUID(orgUUID string, projectUUID *string)
 		args = []interface{}{orgUUID}
 	}
 
-	rows, err := r.db.Query(query, args...)
+	rows, err := r.db.Query(r.db.Rebind(query), args...)
 	if err != nil {
 		return nil, err
 	}
@@ -260,13 +281,13 @@ func (r *APIRepo) GetAPIsByOrganizationUUID(orgUUID string, projectUUID *string)
 	for rows.Next() {
 		api := &model.API{}
 		var transportJSON string
+		var policiesJSON sql.NullString
 		var securityEnabled bool
 
 		err := rows.Scan(&api.ID, &api.Handle, &api.Name, &api.Description,
 			&api.Context, &api.Version, &api.Provider, &api.ProjectID, &api.OrganizationID,
 			&api.LifeCycleStatus, &api.HasThumbnail, &api.IsDefaultVersion,
-			&api.IsRevision, &api.RevisionedAPIID, &api.RevisionID, &api.Type,
-			&transportJSON, &securityEnabled, &api.CreatedAt, &api.UpdatedAt)
+			&api.Type, &transportJSON, &policiesJSON, &securityEnabled, &api.CreatedAt, &api.UpdatedAt)
 		if err != nil {
 			return nil, err
 		}
@@ -274,6 +295,11 @@ func (r *APIRepo) GetAPIsByOrganizationUUID(orgUUID string, projectUUID *string)
 		// Parse transport JSON
 		if transportJSON != "" {
 			json.Unmarshal([]byte(transportJSON), &api.Transport)
+		}
+		if policies, err := deserializePolicies(policiesJSON); err != nil {
+			return nil, err
+		} else {
+			api.Policies = policies
 		}
 
 		// Load related configurations
@@ -293,12 +319,12 @@ func (r *APIRepo) GetDeployedAPIsByGatewayUUID(gatewayUUID, orgUUID string) ([]*
 		SELECT a.uuid, a.name, a.description, a.context, a.version, a.provider,
 		       a.project_uuid, a.organization_uuid, a.type, a.created_at, a.updated_at
 		FROM apis a
-		INNER JOIN api_deployments ad ON a.uuid = ad.api_uuid
-		WHERE ad.gateway_uuid = ? AND a.organization_uuid = ?
+		INNER JOIN api_deployment_status ad ON a.uuid = ad.api_uuid
+		WHERE ad.gateway_uuid = ? AND a.organization_uuid = ? AND ad.status = ?
 		ORDER BY a.created_at DESC
 	`
 
-	rows, err := r.db.Query(query, gatewayUUID, orgUUID)
+	rows, err := r.db.Query(r.db.Rebind(query), gatewayUUID, orgUUID, string(model.DeploymentStatusDeployed))
 	if err != nil {
 		return nil, err
 	}
@@ -330,7 +356,7 @@ func (r *APIRepo) GetAPIsByGatewayUUID(gatewayUUID, orgUUID string) ([]*model.AP
 		ORDER BY a.created_at DESC
 	`
 
-	rows, err := r.db.Query(query, gatewayUUID, orgUUID)
+	rows, err := r.db.Query(r.db.Rebind(query), gatewayUUID, orgUUID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query APIs associated with gateway: %w", err)
 	}
@@ -363,20 +389,22 @@ func (r *APIRepo) UpdateAPI(api *model.API) error {
 
 	// Convert transport slice to JSON
 	transportJSON, _ := json.Marshal(api.Transport)
+	policiesJSON, err := serializePolicies(api.Policies)
+	if err != nil {
+		return err
+	}
 	securityEnabled := api.Security != nil && api.Security.Enabled
 
 	// Update main API record
 	query := `
 		UPDATE apis SET description = ?,
 			provider = ?, lifecycle_status = ?, has_thumbnail = ?,
-			is_default_version = ?, is_revision = ?, revisioned_api_id = ?,
-			revision_id = ?, type = ?, transport = ?, security_enabled = ?, updated_at = ?
+			is_default_version = ?, type = ?, transport = ?, policies = ?, security_enabled = ?, updated_at = ?
 		WHERE uuid = ?
 	`
-	_, err = tx.Exec(query, api.Description,
+	_, err = tx.Exec(r.db.Rebind(query), api.Description,
 		api.Provider, api.LifeCycleStatus,
-		api.HasThumbnail, api.IsDefaultVersion, api.IsRevision,
-		api.RevisionedAPIID, api.RevisionID, api.Type, string(transportJSON),
+		api.HasThumbnail, api.IsDefaultVersion, api.Type, string(transportJSON), policiesJSON,
 		securityEnabled, api.UpdatedAt, api.ID)
 	if err != nil {
 		return err
@@ -419,6 +447,13 @@ func (r *APIRepo) UpdateAPI(api *model.API) error {
 		}
 	}
 
+	// Re-insert channels
+	for _, channel := range api.Channels {
+		if err := r.insertChannel(tx, api.ID, &channel); err != nil {
+			return err
+		}
+	}
+
 	return tx.Commit()
 }
 
@@ -438,7 +473,6 @@ func (r *APIRepo) DeleteAPI(apiUUID, orgUUID string) error {
 		// Delete API deployments
 		`DELETE FROM api_deployments WHERE api_uuid = ?`,
 		// Delete other related tables that reference the API
-		`DELETE FROM policies WHERE operation_id IN (SELECT id FROM api_operations WHERE api_uuid = ?)`,
 		`DELETE FROM operation_backend_services WHERE operation_id IN (SELECT id FROM api_operations WHERE api_uuid = ?)`,
 		`DELETE FROM api_operations WHERE api_uuid = ?`,
 		`DELETE FROM api_backend_services WHERE api_uuid = ?`,
@@ -447,13 +481,14 @@ func (r *APIRepo) DeleteAPI(apiUUID, orgUUID string) error {
 		`DELETE FROM oauth2_security WHERE api_uuid = ?`,
 		`DELETE FROM api_key_security WHERE api_uuid = ?`,
 		`DELETE FROM api_mtls_config WHERE api_uuid = ?`,
+		`DELETE FROM xhub_signature_security WHERE api_uuid = ?`,
 		// Finally delete the main API record
 		`DELETE FROM apis WHERE uuid = ?`,
 	}
 
 	// Execute all delete statements
 	for _, query := range deleteQueries {
-		if _, err := tx.Exec(query, apiUUID); err != nil {
+		if _, err := tx.Exec(r.db.Rebind(query), apiUUID); err != nil {
 			return err
 		}
 	}
@@ -469,7 +504,7 @@ func (r *APIRepo) CheckAPIExistsByHandleInOrganization(handle, orgUUID string) (
 	`
 
 	var count int
-	err := r.db.QueryRow(query, handle, orgUUID).Scan(&count)
+	err := r.db.QueryRow(r.db.Rebind(query), handle, orgUUID).Scan(&count)
 	if err != nil {
 		return false, err
 	}
@@ -526,6 +561,13 @@ func (r *APIRepo) loadAPIConfigurations(api *model.API) error {
 		api.Operations = operations
 	}
 
+	// Load Channels
+	if channels, err := r.loadChannels(api.ID); err != nil {
+		return err
+	} else {
+		api.Channels = channels
+	}
+
 	return nil
 }
 
@@ -536,7 +578,7 @@ func (r *APIRepo) insertMTLSConfig(tx *sql.Tx, apiId string, mtls *model.MTLSCon
 			verify_client, client_cert, client_key, ca_cert)
 		VALUES (?, ?, ?, ?, ?, ?, ?)
 	`
-	_, err := tx.Exec(query, apiId, mtls.Enabled, mtls.EnforceIfClientCertPresent,
+	_, err := tx.Exec(r.db.Rebind(query), apiId, mtls.Enabled, mtls.EnforceIfClientCertPresent,
 		mtls.VerifyClient, mtls.ClientCert, mtls.ClientKey, mtls.CACert)
 	return err
 }
@@ -548,7 +590,7 @@ func (r *APIRepo) loadMTLSConfig(apiId string) (*model.MTLSConfig, error) {
 			client_cert, client_key, ca_cert
 		FROM api_mtls_config WHERE api_uuid = ?
 	`
-	err := r.db.QueryRow(query, apiId).Scan(&mtls.Enabled,
+	err := r.db.QueryRow(r.db.Rebind(query), apiId).Scan(&mtls.Enabled,
 		&mtls.EnforceIfClientCertPresent, &mtls.VerifyClient,
 		&mtls.ClientCert, &mtls.ClientKey, &mtls.CACert)
 	if err != nil {
@@ -568,7 +610,7 @@ func (r *APIRepo) insertSecurityConfig(tx *sql.Tx, apiId string, security *model
 			INSERT INTO api_key_security (api_uuid, enabled, header, query, cookie)
 			VALUES (?, ?, ?, ?, ?)
 		`
-		_, err := tx.Exec(apiKeyQuery, apiId, security.APIKey.Enabled,
+		_, err := tx.Exec(r.db.Rebind(apiKeyQuery), apiId, security.APIKey.Enabled,
 			security.APIKey.Header, security.APIKey.Query, security.APIKey.Cookie)
 		if err != nil {
 			return err
@@ -609,13 +651,24 @@ func (r *APIRepo) insertSecurityConfig(tx *sql.Tx, apiId string, security *model
 				password_enabled, client_credentials_enabled, scopes)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`
-		_, err := tx.Exec(oauth2Query, apiId, true, authCodeEnabled, authCodeCallback,
+		_, err := tx.Exec(r.db.Rebind(oauth2Query), apiId, true, authCodeEnabled, authCodeCallback,
 			implicitEnabled, implicitCallback, passwordEnabled, clientCredEnabled, string(scopesJSON))
 		if err != nil {
 			return err
 		}
 	}
 
+	if security.XHubSignature != nil {
+		xHubQuery := `
+				INSERT INTO xhub_signature_security (api_uuid, enabled, secret, algorithm, header)
+				VALUES (?, ?, ?, ?, ?)
+			`
+		_, err := tx.Exec(r.db.Rebind(xHubQuery), apiId, security.XHubSignature.Enabled,
+			security.XHubSignature.Secret, security.XHubSignature.Algorithm, security.XHubSignature.Header)
+		if err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -628,10 +681,24 @@ func (r *APIRepo) loadSecurityConfig(apiId string) (*model.SecurityConfig, error
 		SELECT enabled, header, query, cookie 
 		FROM api_key_security WHERE api_uuid = ?
 	`
-	err := r.db.QueryRow(apiKeyQuery, apiId).Scan(&apiKey.Enabled,
+	err := r.db.QueryRow(r.db.Rebind(apiKeyQuery), apiId).Scan(&apiKey.Enabled,
 		&apiKey.Header, &apiKey.Query, &apiKey.Cookie)
 	if err == nil {
 		security.APIKey = apiKey
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return nil, err
+	}
+
+	// Load XHub Signature security if present
+	xHub := &model.XHubSignatureSecurity{}
+	xHubQuery := `
+			SELECT enabled, secret, algorithm, header
+			FROM xhub_signature_security WHERE api_uuid = ?
+		`
+	err = r.db.QueryRow(r.db.Rebind(xHubQuery), apiId).Scan(&xHub.Enabled,
+		&xHub.Secret, &xHub.Algorithm, &xHub.Header)
+	if err == nil {
+		security.XHubSignature = xHub
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return nil, err
 	}
@@ -648,7 +715,7 @@ func (r *APIRepo) loadSecurityConfig(apiId string) (*model.SecurityConfig, error
 		FROM oauth2_security WHERE api_uuid = ?
 	`
 	var enabled bool
-	err = r.db.QueryRow(oauth2Query, apiId).Scan(&enabled, &authCodeEnabled, &authCodeCallback,
+	err = r.db.QueryRow(r.db.Rebind(oauth2Query), apiId).Scan(&enabled, &authCodeEnabled, &authCodeCallback,
 		&implicitEnabled, &implicitCallback, &passwordEnabled, &clientCredEnabled, &scopesJSON)
 	if err == nil {
 		if scopesJSON != "" {
@@ -681,8 +748,8 @@ func (r *APIRepo) loadSecurityConfig(apiId string) (*model.SecurityConfig, error
 		return nil, err
 	}
 
-	// Return security config only if we have API key or OAuth2 config
-	if security.APIKey == nil && security.OAuth2 == nil {
+	// Return security config only if we have API key or OAuth2 config or XHubSignature config
+	if security.APIKey == nil && security.OAuth2 == nil && security.XHubSignature == nil {
 		return nil, nil
 	}
 
@@ -696,7 +763,7 @@ func (r *APIRepo) insertCORSConfig(tx *sql.Tx, apiId string, cors *model.CORSCon
 			allow_headers, expose_headers, max_age, allow_credentials)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 	`
-	_, err := tx.Exec(query, apiId, cors.Enabled, cors.AllowOrigins,
+	_, err := tx.Exec(r.db.Rebind(query), apiId, cors.Enabled, cors.AllowOrigins,
 		cors.AllowMethods, cors.AllowHeaders, cors.ExposeHeaders,
 		cors.MaxAge, cors.AllowCredentials)
 	return err
@@ -709,7 +776,7 @@ func (r *APIRepo) loadCORSConfig(apiId string) (*model.CORSConfig, error) {
 			expose_headers, max_age, allow_credentials
 		FROM api_cors_config WHERE api_uuid = ?
 	`
-	err := r.db.QueryRow(query, apiId).Scan(&cors.Enabled, &cors.AllowOrigins,
+	err := r.db.QueryRow(r.db.Rebind(query), apiId).Scan(&cors.Enabled, &cors.AllowOrigins,
 		&cors.AllowMethods, &cors.AllowHeaders, &cors.ExposeHeaders,
 		&cors.MaxAge, &cors.AllowCredentials)
 	if err != nil {
@@ -728,7 +795,7 @@ func (r *APIRepo) insertRateLimitingConfig(tx *sql.Tx, apiId string, rateLimitin
 			rate_limit_time_unit, stop_on_quota_reach)
 		VALUES (?, ?, ?, ?, ?)
 	`
-	_, err := tx.Exec(query, apiId, rateLimiting.Enabled, rateLimiting.RateLimitCount,
+	_, err := tx.Exec(r.db.Rebind(query), apiId, rateLimiting.Enabled, rateLimiting.RateLimitCount,
 		rateLimiting.RateLimitTimeUnit, rateLimiting.StopOnQuotaReach)
 	return err
 }
@@ -739,7 +806,7 @@ func (r *APIRepo) loadRateLimitingConfig(apiId string) (*model.RateLimitingConfi
 		SELECT enabled, rate_limit_count, rate_limit_time_unit, stop_on_quota_reach
 		FROM api_rate_limiting WHERE api_uuid = ?
 	`
-	err := r.db.QueryRow(query, apiId).Scan(&rateLimiting.Enabled,
+	err := r.db.QueryRow(r.db.Rebind(query), apiId).Scan(&rateLimiting.Enabled,
 		&rateLimiting.RateLimitCount, &rateLimiting.RateLimitTimeUnit,
 		&rateLimiting.StopOnQuotaReach)
 	if err != nil {
@@ -755,6 +822,7 @@ func (r *APIRepo) loadRateLimitingConfig(apiId string) (*model.RateLimitingConfi
 func (r *APIRepo) insertOperation(tx *sql.Tx, apiId string, organizationId string, operation *model.Operation) error {
 	var authRequired bool
 	var scopesJSON string
+	var err error
 	if operation.Request.Authentication != nil {
 		authRequired = operation.Request.Authentication.Required
 		if len(operation.Request.Authentication.Scopes) > 0 {
@@ -762,21 +830,42 @@ func (r *APIRepo) insertOperation(tx *sql.Tx, apiId string, organizationId strin
 			scopesJSON = string(scopesBytes)
 		}
 	}
-
-	// Insert operation
-	opQuery := `
-		INSERT INTO api_operations (api_uuid, name, description, method, path, authentication_required, scopes)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
-	`
-	result, err := tx.Exec(opQuery, apiId, operation.Name, operation.Description,
-		operation.Request.Method, operation.Request.Path, authRequired, scopesJSON)
+	policiesValue, err := serializePolicies(operation.Request.Policies)
 	if err != nil {
 		return err
 	}
 
-	operationID, err := result.LastInsertId()
-	if err != nil {
-		return err
+	// Insert operation
+	var operationID int64
+	if r.db.Driver() == "postgres" || r.db.Driver() == "postgresql" {
+		// PostgreSQL: use RETURNING to get the generated ID
+		opQuery := `
+			INSERT INTO api_operations (api_uuid, name, description, method, path, authentication_required, scopes, policies)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+			RETURNING id
+		`
+		if err := tx.QueryRow(r.db.Rebind(opQuery), apiId, operation.Name, operation.Description,
+			operation.Request.Method, operation.Request.Path, authRequired, scopesJSON, policiesValue).Scan(&operationID); err != nil {
+			return err
+		}
+	} else {
+		// SQLite (and other drivers that support LastInsertId)
+		opQuery := `
+			INSERT INTO api_operations (api_uuid, name, description, method, path, authentication_required, scopes, policies)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		`
+		result, err := tx.Exec(r.db.Rebind(opQuery), apiId, operation.Name, operation.Description,
+			operation.Request.Method, operation.Request.Path, authRequired, scopesJSON, policiesValue)
+		if err != nil {
+			return err
+		}
+
+		var lastID int64
+		lastID, err = result.LastInsertId()
+		if err != nil {
+			return err
+		}
+		operationID = lastID
 	}
 
 	// Insert backend services routing
@@ -784,7 +873,7 @@ func (r *APIRepo) insertOperation(tx *sql.Tx, apiId string, organizationId strin
 		// Look up backend service UUID by name and organization ID
 		var backendServiceUUID string
 		lookupQuery := `SELECT uuid FROM backend_services WHERE name = ? AND organization_uuid = ?`
-		err = tx.QueryRow(lookupQuery, backendRouting.Name, organizationId).Scan(&backendServiceUUID)
+		err = tx.QueryRow(r.db.Rebind(lookupQuery), backendRouting.Name, organizationId).Scan(&backendServiceUUID)
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				return fmt.Errorf("backend service with name '%s' not found in organization", backendRouting.Name)
@@ -796,15 +885,7 @@ func (r *APIRepo) insertOperation(tx *sql.Tx, apiId string, organizationId strin
 			INSERT INTO operation_backend_services (operation_id, backend_service_uuid, weight)
 			VALUES (?, ?, ?)
 		`
-		_, err = tx.Exec(bsQuery, operationID, backendServiceUUID, backendRouting.Weight)
-		if err != nil {
-			return err
-		}
-	}
-
-	// Insert policies
-	for _, policy := range operation.Request.Policies {
-		if err := r.insertPolicy(tx, operationID, &policy); err != nil {
+		if _, err = tx.Exec(r.db.Rebind(bsQuery), operationID, backendServiceUUID, backendRouting.Weight); err != nil {
 			return err
 		}
 	}
@@ -812,27 +893,108 @@ func (r *APIRepo) insertOperation(tx *sql.Tx, apiId string, organizationId strin
 	return nil
 }
 
-func (r *APIRepo) insertPolicy(tx *sql.Tx, operationID int64, policy *model.Policy) error {
-	var paramsJSON []byte
-	if policy.Params != nil {
-		paramsJSON, _ = json.Marshal(*policy.Params)
+func (r *APIRepo) insertChannel(tx *sql.Tx, apiId string, channel *model.Channel) error {
+	var authRequired bool
+	var scopesJSON string
+	if channel.Request.Authentication != nil {
+		authRequired = channel.Request.Authentication.Required
+		if len(channel.Request.Authentication.Scopes) > 0 {
+			scopesBytes, _ := json.Marshal(channel.Request.Authentication.Scopes)
+			scopesJSON = string(scopesBytes)
+		}
+	}
+	policiesJSON, err := serializePolicies(channel.Request.Policies)
+	if err != nil {
+		return err
+	}
+	// Insert channel
+	var channelID int64
+	if r.db.Driver() == "postgres" || r.db.Driver() == "postgresql" {
+		// PostgreSQL: use RETURNING to get the generated ID
+		channelQuery := `
+		INSERT INTO api_operations (api_uuid, name, description, method, path, authentication_required, scopes, policies)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		RETURNING id`
+		if err := tx.QueryRow(r.db.Rebind(channelQuery), apiId, channel.Name, channel.Description,
+			channel.Request.Method, channel.Request.Name, authRequired, scopesJSON, policiesJSON).Scan(&channelID); err != nil {
+			return err
+		}
+	} else {
+		// SQLite (and other drivers that support LastInsertId)
+		channelQuery := `
+		INSERT INTO api_operations (api_uuid, name, description, method, path, authentication_required, scopes, policies)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+		result, err := tx.Exec(r.db.Rebind(channelQuery), apiId, channel.Name, channel.Description,
+			channel.Request.Method, channel.Request.Name, authRequired, scopesJSON, policiesJSON)
+		if err != nil {
+			return err
+		}
+
+		channelID, err = result.LastInsertId()
+		if err != nil {
+			return err
+		}
 	}
 
-	policyQuery := `
-		INSERT INTO policies (operation_id, name, params, execution_condition, version)
-		VALUES (?, ?, ?, ?, ?)
+	return nil
+}
+
+func (r *APIRepo) loadChannels(apiId string) ([]model.Channel, error) {
+	query := `
+		SELECT id, name, description, method, path, authentication_required, scopes, policies 
+		FROM api_operations WHERE api_uuid = ?
 	`
-	_, err := tx.Exec(policyQuery, operationID, policy.Name, string(paramsJSON),
-		policy.ExecutionCondition, policy.Version)
-	return err
+	rows, err := r.db.Query(r.db.Rebind(query), apiId)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var channels []model.Channel
+	for rows.Next() {
+		var operationID int64
+		channel := model.Channel{
+			Request: &model.ChannelRequest{},
+		}
+		var authRequired bool
+		var scopesJSON string
+		var policiesJSON sql.NullString
+
+		err := rows.Scan(&operationID, &channel.Name, &channel.Description,
+			&channel.Request.Method, &channel.Request.Name, &authRequired, &scopesJSON, &policiesJSON)
+		if err != nil {
+			return nil, err
+		}
+
+		// Build authentication config
+		if authRequired || scopesJSON != "" {
+			auth := &model.AuthenticationConfig{Required: authRequired}
+			if scopesJSON != "" {
+				json.Unmarshal([]byte(scopesJSON), &auth.Scopes)
+			}
+			channel.Request.Authentication = auth
+		}
+
+		policies, err := deserializePolicies(policiesJSON)
+		if err != nil {
+			return nil, err
+		}
+		if policies != nil {
+			channel.Request.Policies = policies
+		}
+
+		channels = append(channels, channel)
+	}
+
+	return channels, rows.Err()
 }
 
 func (r *APIRepo) loadOperations(apiId string) ([]model.Operation, error) {
 	query := `
-		SELECT id, name, description, method, path, authentication_required, scopes 
+		SELECT id, name, description, method, path, authentication_required, scopes, policies 
 		FROM api_operations WHERE api_uuid = ?
 	`
-	rows, err := r.db.Query(query, apiId)
+	rows, err := r.db.Query(r.db.Rebind(query), apiId)
 	if err != nil {
 		return nil, err
 	}
@@ -846,9 +1008,10 @@ func (r *APIRepo) loadOperations(apiId string) ([]model.Operation, error) {
 		}
 		var authRequired bool
 		var scopesJSON string
+		var policiesJSON sql.NullString
 
 		err := rows.Scan(&operationID, &operation.Name, &operation.Description,
-			&operation.Request.Method, &operation.Request.Path, &authRequired, &scopesJSON)
+			&operation.Request.Method, &operation.Request.Path, &authRequired, &scopesJSON, &policiesJSON)
 		if err != nil {
 			return nil, err
 		}
@@ -869,10 +1032,11 @@ func (r *APIRepo) loadOperations(apiId string) ([]model.Operation, error) {
 			operation.Request.BackendServices = backendServices
 		}
 
-		// Load policies
-		if policies, err := r.loadPolicies(operationID); err != nil {
+		policies, err := deserializePolicies(policiesJSON)
+		if err != nil {
 			return nil, err
-		} else {
+		}
+		if policies != nil {
 			operation.Request.Policies = policies
 		}
 
@@ -889,7 +1053,7 @@ func (r *APIRepo) loadOperationBackendServices(operationID int64) ([]model.Backe
 		JOIN backend_services bs ON bs.uuid = obs.backend_service_uuid
 		WHERE obs.operation_id = ?
 	`
-	rows, err := r.db.Query(query, operationID)
+	rows, err := r.db.Query(r.db.Rebind(query), operationID)
 	if err != nil {
 		return nil, err
 	}
@@ -908,46 +1072,35 @@ func (r *APIRepo) loadOperationBackendServices(operationID int64) ([]model.Backe
 	return backendServices, rows.Err()
 }
 
-func (r *APIRepo) loadPolicies(operationID int64) ([]model.Policy, error) {
-	query := `SELECT name, params, execution_condition, version FROM policies WHERE operation_id = ?`
-	rows, err := r.db.Query(query, operationID)
+func serializePolicies(policies []model.Policy) (any, error) {
+	if policies == nil {
+		policies = []model.Policy{}
+	}
+	policiesJSON, err := json.Marshal(policies)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 
-	var policies []model.Policy
-	for rows.Next() {
-		policy := model.Policy{}
-		var paramsJSON sql.NullString
-		var executionCondition sql.NullString
+	return string(policiesJSON), nil
+}
 
-		err := rows.Scan(&policy.Name, &paramsJSON, &executionCondition, &policy.Version)
-		if err != nil {
-			return nil, err
-		}
-
-		if paramsJSON.Valid && paramsJSON.String != "" {
-			var params map[string]interface{}
-			json.Unmarshal([]byte(paramsJSON.String), &params)
-			policy.Params = &params
-		}
-
-		if executionCondition.Valid {
-			policy.ExecutionCondition = &executionCondition.String
-		}
-
-		policies = append(policies, policy)
+func deserializePolicies(policiesJSON sql.NullString) ([]model.Policy, error) {
+	if !policiesJSON.Valid || policiesJSON.String == "" {
+		return []model.Policy{}, nil
 	}
 
-	return policies, rows.Err()
+	var policies []model.Policy
+	if err := json.Unmarshal([]byte(policiesJSON.String), &policies); err != nil {
+		return nil, err
+	}
+
+	return policies, nil
 }
 
 // Helper method to delete all API configurations (used in Update)
 func (r *APIRepo) deleteAPIConfigurations(tx *sql.Tx, apiId string) error {
 	// Delete in reverse order of dependencies
 	queries := []string{
-		`DELETE FROM policies WHERE operation_id IN (SELECT id FROM api_operations WHERE api_uuid = ?)`,
 		`DELETE FROM operation_backend_services WHERE operation_id IN (SELECT id FROM api_operations WHERE api_uuid = ?)`,
 		`DELETE FROM api_operations WHERE api_uuid = ?`,
 		`DELETE FROM api_backend_services WHERE api_uuid = ?`, // Remove API-backend service associations
@@ -956,10 +1109,11 @@ func (r *APIRepo) deleteAPIConfigurations(tx *sql.Tx, apiId string) error {
 		`DELETE FROM oauth2_security WHERE api_uuid = ?`,
 		`DELETE FROM api_key_security WHERE api_uuid = ?`,
 		`DELETE FROM api_mtls_config WHERE api_uuid = ?`,
+		`DELETE FROM xhub_signature_security WHERE api_uuid = ?`,
 	}
 
 	for _, query := range queries {
-		if _, err := tx.Exec(query, apiId); err != nil {
+		if _, err := tx.Exec(r.db.Rebind(query), apiId); err != nil {
 			return err
 		}
 	}
@@ -967,40 +1121,481 @@ func (r *APIRepo) deleteAPIConfigurations(tx *sql.Tx, apiId string) error {
 	return nil
 }
 
-// CreateDeployment inserts a new API deployment record
-func (r *APIRepo) CreateDeployment(deployment *model.APIDeployment) error {
+// CreateDeploymentWithLimitEnforcement atomically creates a deployment with hard limit enforcement
+// If deployment count >= hardLimit, deletes oldest 5 ARCHIVED deployments before inserting new one
+// This entire operation is wrapped in a single transaction to ensure atomicity
+// and to leverage row-level locks during deletion to reduce race conditions.
+func (r *APIRepo) CreateDeploymentWithLimitEnforcement(deployment *model.APIDeployment, hardLimit int) error {
+	tx, err := r.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	// Generate UUID for deployment if not already set
+	if deployment.DeploymentID == "" {
+		deployment.DeploymentID = uuid.New().String()
+	}
 	deployment.CreatedAt = time.Now()
 
-	query := `
-		INSERT INTO api_deployments (api_uuid, organization_uuid, gateway_uuid, created_at)
-		VALUES (?, ?, ?, ?)
+	// Status must be provided and should be DEPLOYED for new deployments
+	if deployment.Status == nil {
+		deployed := model.DeploymentStatusDeployed
+		deployment.Status = &deployed
+	}
+
+	updatedAt := time.Now()
+	deployment.UpdatedAt = &updatedAt
+
+	// 1. Count total deployments for this API+Gateway
+	var count int
+	countQuery := `
+		SELECT COUNT(*)
+		FROM api_deployments
+		WHERE api_uuid = ? AND gateway_uuid = ? AND organization_uuid = ?
+	`
+	err = tx.QueryRow(r.db.Rebind(countQuery), deployment.ApiID, deployment.GatewayID, deployment.OrganizationID).Scan(&count)
+	if err != nil {
+		return err
+	}
+
+	// 2. If at/over hard limit, delete oldest 5 ARCHIVED deployments
+	if count >= hardLimit {
+		// Get oldest 5 ARCHIVED deployment IDs (LEFT JOIN WHERE status IS NULL)
+		getOldestQuery := `
+			SELECT d.deployment_id
+			FROM api_deployments d
+			LEFT JOIN api_deployment_status s ON d.deployment_id = s.deployment_id
+				AND d.api_uuid = s.api_uuid
+				AND d.organization_uuid = s.organization_uuid
+				AND d.gateway_uuid = s.gateway_uuid
+			WHERE d.api_uuid = ? AND d.gateway_uuid = ? AND d.organization_uuid = ?
+				AND s.deployment_id IS NULL
+			ORDER BY d.created_at ASC
+			LIMIT 5
+		`
+
+		rows, err := tx.Query(r.db.Rebind(getOldestQuery), deployment.ApiID, deployment.GatewayID, deployment.OrganizationID)
+		if err != nil {
+			return err
+		}
+
+		var idsToDelete []string
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return err
+			}
+			idsToDelete = append(idsToDelete, id)
+		}
+		rows.Close()
+
+		// Check for iteration errors
+		if err := rows.Err(); err != nil {
+			return err
+		}
+
+		// Delete one-by-one to use row-level locks (prevents over-deletion in concurrent scenarios)
+		deleteQuery := `DELETE FROM api_deployments WHERE deployment_id = ?`
+		for _, id := range idsToDelete {
+			_, err := tx.Exec(r.db.Rebind(deleteQuery), id)
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	// 3. Insert new deployment artifact
+	deploymentQuery := `
+		INSERT INTO api_deployments (deployment_id, name, api_uuid, organization_uuid, gateway_uuid, base_deployment_id, content, metadata, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 
-	result, err := r.db.Exec(query, deployment.ApiID, deployment.OrganizationID,
-		deployment.GatewayID, deployment.CreatedAt)
+	var baseDeploymentID interface{}
+	if deployment.BaseDeploymentID != nil {
+		baseDeploymentID = *deployment.BaseDeploymentID
+	}
+
+	var metadataJSON string
+	if len(deployment.Metadata) > 0 {
+		metadataBytes, err := json.Marshal(deployment.Metadata)
+		if err != nil {
+			return fmt.Errorf("failed to marshal deployment metadata: %w", err)
+		}
+		metadataJSON = string(metadataBytes)
+	}
+
+	_, err = tx.Exec(r.db.Rebind(deploymentQuery), deployment.DeploymentID, deployment.Name, deployment.ApiID, deployment.OrganizationID,
+		deployment.GatewayID, baseDeploymentID, deployment.Content, metadataJSON, deployment.CreatedAt)
 	if err != nil {
 		return err
 	}
 
-	id, err := result.LastInsertId()
+	// 4. Insert or update deployment status (UPSERT)
+	var statusQuery string
+	if r.db.Driver() == "postgres" || r.db.Driver() == "postgresql" {
+		statusQuery = `
+			INSERT INTO api_deployment_status (api_uuid, organization_uuid, gateway_uuid, deployment_id, status, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?)
+			ON CONFLICT (api_uuid, organization_uuid, gateway_uuid)
+			DO UPDATE SET deployment_id = EXCLUDED.deployment_id, status = EXCLUDED.status, updated_at = EXCLUDED.updated_at
+		`
+	} else {
+		statusQuery = `
+			REPLACE INTO api_deployment_status (api_uuid, organization_uuid, gateway_uuid, deployment_id, status, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?)
+		`
+	}
+
+	// Status and UpdatedAt are guaranteed to be non-nil by initialization at function start
+	_, err = tx.Exec(r.db.Rebind(statusQuery),
+		deployment.ApiID,
+		deployment.OrganizationID,
+		deployment.GatewayID,
+		deployment.DeploymentID,
+		*deployment.Status,
+		*deployment.UpdatedAt,
+	)
 	if err != nil {
 		return err
 	}
 
-	deployment.ID = int(id)
+	return tx.Commit()
+}
+
+// GetDeploymentWithContent retrieves a deployment including its content (for rollback/base deployment scenarios)
+func (r *APIRepo) GetDeploymentWithContent(deploymentID, apiID, orgID string) (*model.APIDeployment, error) {
+	deployment := &model.APIDeployment{}
+
+	query := `
+		SELECT deployment_id, name, api_uuid, organization_uuid, gateway_uuid, base_deployment_id, content, metadata, created_at
+		FROM api_deployments
+		WHERE deployment_id = ? AND api_uuid = ? AND organization_uuid = ?
+	`
+
+	var baseDeploymentID sql.NullString
+	var metadataJSON string
+
+	err := r.db.QueryRow(r.db.Rebind(query), deploymentID, apiID, orgID).Scan(
+		&deployment.DeploymentID, &deployment.Name, &deployment.ApiID, &deployment.OrganizationID,
+		&deployment.GatewayID, &baseDeploymentID, &deployment.Content, &metadataJSON, &deployment.CreatedAt)
+
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, constants.ErrDeploymentNotFound
+		}
+		return nil, err
+	}
+
+	if baseDeploymentID.Valid {
+		deployment.BaseDeploymentID = &baseDeploymentID.String
+	}
+
+	if metadataJSON != "" {
+		var metadata map[string]interface{}
+		if err := json.Unmarshal([]byte(metadataJSON), &metadata); err == nil {
+			deployment.Metadata = metadata
+		} else {
+			return nil, fmt.Errorf("failed to unmarshal deployment metadata: %w", err)
+		}
+	}
+
+	return deployment, nil
+}
+
+// DeleteDeployment deletes a deployment record
+func (r *APIRepo) DeleteDeployment(deploymentID, apiID, orgID string) error {
+	query := `DELETE FROM api_deployments WHERE deployment_id = ? AND api_uuid = ? AND organization_uuid = ?`
+
+	result, err := r.db.Exec(r.db.Rebind(query), deploymentID, apiID, orgID)
+	if err != nil {
+		return err
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+
+	if rowsAffected == 0 {
+		return constants.ErrDeploymentNotFound
+	}
+
 	return nil
 }
 
-// GetDeploymentsByAPIUUID retrieves all deployment records for an API
-func (r *APIRepo) GetDeploymentsByAPIUUID(apiUUID, orgUUID string) ([]*model.APIDeployment, error) {
+// GetCurrentDeploymentByGateway retrieves the currently DEPLOYED deployment for an API on a gateway
+// Returns only deployments with DEPLOYED status (filters out UNDEPLOYED/suspended deployments)
+func (r *APIRepo) GetCurrentDeploymentByGateway(apiUUID, gatewayID, orgID string) (*model.APIDeployment, error) {
+	deployment := &model.APIDeployment{}
+
 	query := `
-		SELECT id, api_uuid, organization_uuid, gateway_uuid, created_at
-		FROM api_deployments
-		WHERE api_uuid = ? AND organization_uuid = ?
-		ORDER BY created_at DESC
+		SELECT 
+			d.deployment_id, d.name, d.api_uuid, d.organization_uuid, d.gateway_uuid, 
+			d.base_deployment_id, d.content, d.metadata, d.created_at,
+			s.status, s.updated_at AS status_updated_at
+		FROM api_deployments d
+		INNER JOIN api_deployment_status s 
+			ON d.deployment_id = s.deployment_id
+			AND d.api_uuid = s.api_uuid
+			AND d.organization_uuid = s.organization_uuid
+			AND d.gateway_uuid = s.gateway_uuid
+		WHERE d.api_uuid = ? AND d.gateway_uuid = ? AND d.organization_uuid = ?
+			AND s.status = ?
+		ORDER BY d.created_at DESC
+		LIMIT 1
 	`
 
-	rows, err := r.db.Query(query, apiUUID, orgUUID)
+	var baseDeploymentID sql.NullString
+	var metadataJSON string
+	var statusStr string
+	var updatedAt time.Time
+
+	err := r.db.QueryRow(r.db.Rebind(query), apiUUID, gatewayID, orgID, string(model.DeploymentStatusDeployed)).Scan(
+		&deployment.DeploymentID, &deployment.Name, &deployment.ApiID, &deployment.OrganizationID,
+		&deployment.GatewayID, &baseDeploymentID, &deployment.Content, &metadataJSON, &deployment.CreatedAt,
+		&statusStr, &updatedAt)
+
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	if baseDeploymentID.Valid {
+		deployment.BaseDeploymentID = &baseDeploymentID.String
+	}
+
+	if metadataJSON != "" {
+		var metadata map[string]interface{}
+		if err := json.Unmarshal([]byte(metadataJSON), &metadata); err == nil {
+			deployment.Metadata = metadata
+		} else {
+			return nil, fmt.Errorf("failed to unmarshal deployment metadata: %w", err)
+		}
+	}
+
+	// Populate status fields
+	status := model.DeploymentStatus(statusStr)
+	deployment.Status = &status
+	deployment.UpdatedAt = &updatedAt
+
+	return deployment, nil
+}
+
+// SetCurrentDeployment inserts or updates the deployment status record to set the current deployment for an API on a gateway
+func (r *APIRepo) SetCurrentDeployment(apiUUID, orgUUID, gatewayID, deploymentID string, status model.DeploymentStatus) (time.Time, error) {
+	updatedAt := time.Now()
+
+	if r.db.Driver() == "postgres" || r.db.Driver() == "postgresql" {
+		// PostgreSQL: Use ON CONFLICT
+		query := `
+			INSERT INTO api_deployment_status (api_uuid, organization_uuid, gateway_uuid, deployment_id, status, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?)
+			ON CONFLICT (api_uuid, organization_uuid, gateway_uuid)
+			DO UPDATE SET deployment_id = ?, status = ?, updated_at = ?
+		`
+		_, err := r.db.Exec(r.db.Rebind(query),
+			apiUUID, orgUUID, gatewayID, deploymentID, status, updatedAt,
+			deploymentID, status, updatedAt)
+		return updatedAt, err
+	} else {
+		// SQLite: Use REPLACE
+		query := `
+			REPLACE INTO api_deployment_status (api_uuid, organization_uuid, gateway_uuid, deployment_id, status, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?)
+		`
+		_, err := r.db.Exec(r.db.Rebind(query),
+			apiUUID, orgUUID, gatewayID, deploymentID, status, updatedAt)
+		return updatedAt, err
+	}
+}
+
+// GetDeploymentStatus retrieves the current deployment status for an API on a gateway (lightweight - no content)
+func (r *APIRepo) GetDeploymentStatus(apiUUID, orgUUID, gatewayID string) (string, model.DeploymentStatus, *time.Time, error) {
+	query := `
+		SELECT deployment_id, status, updated_at
+		FROM api_deployment_status
+		WHERE api_uuid = ? AND organization_uuid = ? AND gateway_uuid = ?
+	`
+
+	var deploymentID string
+	var statusStr string
+	var updatedAt time.Time
+
+	err := r.db.QueryRow(r.db.Rebind(query), apiUUID, orgUUID, gatewayID).Scan(
+		&deploymentID, &statusStr, &updatedAt)
+
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			// No status row means no active deployment (all ARCHIVED)
+			return "", "", nil, nil
+		}
+		return "", "", nil, err
+	}
+
+	return deploymentID, model.DeploymentStatus(statusStr), &updatedAt, nil
+}
+
+// DeleteDeploymentStatus deletes the status entry for an API on a gateway
+func (r *APIRepo) DeleteDeploymentStatus(apiUUID, orgUUID, gatewayID string) error {
+	query := `
+		DELETE FROM api_deployment_status
+		WHERE api_uuid = ? AND organization_uuid = ? AND gateway_uuid = ?
+	`
+
+	_, err := r.db.Exec(r.db.Rebind(query), apiUUID, orgUUID, gatewayID)
+	return err
+}
+
+// GetDeploymentWithState retrieves a deployment with its lifecycle state populated (without content - lightweight)
+func (r *APIRepo) GetDeploymentWithState(deploymentID, apiUUID, orgUUID string) (*model.APIDeployment, error) {
+	deployment := &model.APIDeployment{}
+
+	query := `
+		SELECT 
+			d.deployment_id, d.name, d.api_uuid, d.organization_uuid, d.gateway_uuid, 
+			d.base_deployment_id, d.metadata, d.created_at,
+			s.status, s.updated_at AS status_updated_at
+		FROM api_deployments d
+		LEFT JOIN api_deployment_status s 
+			ON d.deployment_id = s.deployment_id
+			AND d.api_uuid = s.api_uuid
+			AND d.organization_uuid = s.organization_uuid
+			AND d.gateway_uuid = s.gateway_uuid
+		WHERE d.deployment_id = ? AND d.api_uuid = ? AND d.organization_uuid = ?
+	`
+
+	var baseDeploymentID sql.NullString
+	var metadataJSON string
+	var statusStr sql.NullString
+	var updatedAtVal sql.NullTime
+
+	err := r.db.QueryRow(r.db.Rebind(query), deploymentID, apiUUID, orgUUID).Scan(
+		&deployment.DeploymentID, &deployment.Name, &deployment.ApiID, &deployment.OrganizationID, &deployment.GatewayID,
+		&baseDeploymentID, &metadataJSON, &deployment.CreatedAt,
+		&statusStr, &updatedAtVal)
+
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, constants.ErrDeploymentNotFound
+		}
+		return nil, err
+	}
+
+	// Set nullable fields
+	if baseDeploymentID.Valid {
+		deployment.BaseDeploymentID = &baseDeploymentID.String
+	}
+
+	if metadataJSON != "" {
+		var metadata map[string]interface{}
+		if err := json.Unmarshal([]byte(metadataJSON), &metadata); err == nil {
+			deployment.Metadata = metadata
+		} else {
+			return nil, fmt.Errorf("failed to unmarshal deployment metadata: %w", err)
+		}
+	}
+
+	// Populate status fields from JOIN (nil if ARCHIVED)
+	if statusStr.Valid {
+		st := model.DeploymentStatus(statusStr.String)
+		deployment.Status = &st
+		if updatedAtVal.Valid {
+			deployment.UpdatedAt = &updatedAtVal.Time
+		}
+	} else {
+		// ARCHIVED state - Status and UpdatedAt remain nil
+		archived := model.DeploymentStatusArchived
+		deployment.Status = &archived
+	}
+
+	return deployment, nil
+}
+
+// GetDeploymentsWithState retrieves deployments with their lifecycle states.
+// It enforces a soft limit of N records per Gateway, ensuring that the
+// currently DEPLOYED or UNDEPLOYED record is always included regardless of its age.
+func (r *APIRepo) GetDeploymentsWithState(apiUUID, orgUUID string, gatewayID *string, status *string, maxPerAPIGW int) ([]*model.APIDeployment, error) {
+
+	// 1. Validation Logic
+	if status != nil {
+		validStatuses := map[string]bool{
+			string(model.DeploymentStatusDeployed):   true,
+			string(model.DeploymentStatusUndeployed): true,
+			string(model.DeploymentStatusArchived):   true,
+		}
+		if !validStatuses[*status] {
+			return nil, fmt.Errorf("invalid deployment status: %s", *status)
+		}
+	}
+
+	var args []interface{}
+
+	// 2. Build the CTE (Common Table Expression)
+	// We rank within the CTE to ensure each Gateway gets its own "Top N" bucket.
+	// Order Priority:
+	//   1. Records with an active status (Deployed/Undeployed)
+	//   2. Creation date (Newest first)
+	query := `
+        WITH AnnotatedDeployments AS (
+            SELECT 
+                d.deployment_id, d.name, d.api_uuid, d.organization_uuid, d.gateway_uuid,
+                d.base_deployment_id, d.metadata, d.created_at,
+                s.status as current_status,
+                s.updated_at as status_updated_at,
+                ROW_NUMBER() OVER (
+                    PARTITION BY d.gateway_uuid 
+                    ORDER BY 
+                        (CASE WHEN s.status IS NOT NULL THEN 0 ELSE 1 END) ASC, 
+                        d.created_at DESC
+                ) as rank_idx
+            FROM api_deployments d
+            LEFT JOIN api_deployment_status s 
+                ON d.deployment_id = s.deployment_id
+                AND d.gateway_uuid = s.gateway_uuid
+				AND d.api_uuid = s.api_uuid
+				AND d.organization_uuid = s.organization_uuid
+            WHERE d.api_uuid = ? AND d.organization_uuid = ?
+    `
+	args = append(args, apiUUID, orgUUID)
+
+	if gatewayID != nil {
+		query += " AND d.gateway_uuid = ?"
+		args = append(args, *gatewayID)
+	}
+
+	// 3. Close CTE and start Outer Selection
+	query += `
+        )
+        SELECT 
+            deployment_id, name, api_uuid, organization_uuid, gateway_uuid,
+            base_deployment_id, metadata, created_at,
+            current_status, status_updated_at
+        FROM AnnotatedDeployments
+        WHERE rank_idx <= ?
+    `
+	args = append(args, maxPerAPIGW)
+
+	// 4. Apply Status Filters on the Ranked Set
+	if status != nil {
+		if *status == string(model.DeploymentStatusArchived) {
+			// ARCHIVED means no entry exists in the status table for this artifact
+			query += " AND current_status IS NULL"
+		} else {
+			// DEPLOYED or UNDEPLOYED must match the status column exactly
+			query += " AND current_status = ?"
+			args = append(args, *status)
+		}
+	}
+
+	// Final sorting for the application layer
+	query += " ORDER BY gateway_uuid ASC, rank_idx ASC"
+
+	// 5. Execution
+	rows, err := r.db.Query(r.db.Rebind(query), args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1008,36 +1603,93 @@ func (r *APIRepo) GetDeploymentsByAPIUUID(apiUUID, orgUUID string) ([]*model.API
 
 	var deployments []*model.APIDeployment
 	for rows.Next() {
-		var deployment model.APIDeployment
-		err := rows.Scan(&deployment.ID, &deployment.ApiID, &deployment.OrganizationID,
-			&deployment.GatewayID, &deployment.CreatedAt)
+		deployment := &model.APIDeployment{}
+		var baseDeploymentID sql.NullString
+		var metadataJSON string
+		var statusStr sql.NullString
+		var updatedAtVal sql.NullTime
+
+		err := rows.Scan(
+			&deployment.DeploymentID, &deployment.Name, &deployment.ApiID,
+			&deployment.OrganizationID, &deployment.GatewayID,
+			&baseDeploymentID, &metadataJSON, &deployment.CreatedAt,
+			&statusStr, &updatedAtVal)
+
 		if err != nil {
 			return nil, err
 		}
-		deployments = append(deployments, &deployment)
+
+		// Handle Nullable BaseDeploymentID
+		if baseDeploymentID.Valid {
+			deployment.BaseDeploymentID = &baseDeploymentID.String
+		}
+
+		// Handle Metadata
+		if metadataJSON != "" {
+			var metadata map[string]interface{}
+			if err := json.Unmarshal([]byte(metadataJSON), &metadata); err == nil {
+				deployment.Metadata = metadata
+			} else {
+				return nil, fmt.Errorf("failed to unmarshal deployment metadata: %w", err)
+			}
+		}
+
+		// Map Database Status to Model Status
+		if statusStr.Valid {
+			st := model.DeploymentStatus(statusStr.String)
+			deployment.Status = &st
+			if updatedAtVal.Valid {
+				deployment.UpdatedAt = &updatedAtVal.Time
+			}
+		} else {
+			// If the JOIN resulted in NULL, the record is ARCHIVED
+			archived := model.DeploymentStatusArchived
+			deployment.Status = &archived
+			// For Archived, UpdatedAt usually defaults to nil
+		}
+
+		deployments = append(deployments, deployment)
 	}
 
-	return deployments, rows.Err()
+	// Check if the loop stopped because of an error rather than reaching the end
+	if err = rows.Err(); err != nil {
+		return nil, fmt.Errorf("error during deployment rows iteration: %w", err)
+	}
+
+	return deployments, nil
 }
 
 // CreateAPIAssociation creates an association between an API and resource (e.g., gateway or dev portal)
 func (r *APIRepo) CreateAPIAssociation(association *model.APIAssociation) error {
-	query := `
-		INSERT INTO api_associations (api_uuid, organization_uuid, resource_uuid, association_type, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?)
-	`
-	result, err := r.db.Exec(query, association.ApiID, association.OrganizationID, association.ResourceID,
-		association.AssociationType, association.CreatedAt, association.UpdatedAt)
-	if err != nil {
-		return err
-	}
+	if r.db.Driver() == "postgres" || r.db.Driver() == "postgresql" {
+		// PostgreSQL: use RETURNING to get the generated ID
+		query := `
+			INSERT INTO api_associations (api_uuid, organization_uuid, resource_uuid, association_type, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?)
+			RETURNING id
+		`
+		if err := r.db.QueryRow(r.db.Rebind(query), association.ApiID, association.OrganizationID, association.ResourceID,
+			association.AssociationType, association.CreatedAt, association.UpdatedAt).Scan(&association.ID); err != nil {
+			return err
+		}
+	} else {
+		// SQLite: use LastInsertId
+		query := `
+			INSERT INTO api_associations (api_uuid, organization_uuid, resource_uuid, association_type, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?)
+		`
+		result, err := r.db.Exec(r.db.Rebind(query), association.ApiID, association.OrganizationID, association.ResourceID,
+			association.AssociationType, association.CreatedAt, association.UpdatedAt)
+		if err != nil {
+			return err
+		}
 
-	// Get the auto-generated ID
-	id, err := result.LastInsertId()
-	if err != nil {
-		return err
+		lastID, err := result.LastInsertId()
+		if err != nil {
+			return err
+		}
+		association.ID = lastID
 	}
-	association.ID = int(id)
 
 	return nil
 }
@@ -1049,7 +1701,7 @@ func (r *APIRepo) UpdateAPIAssociation(apiUUID, resourceId, associationType, org
 		SET updated_at = ?
 		WHERE api_uuid = ? AND resource_uuid = ? AND association_type = ? AND organization_uuid = ?
 	`
-	_, err := r.db.Exec(query, time.Now(), apiUUID, resourceId, associationType, orgUUID)
+	_, err := r.db.Exec(r.db.Rebind(query), time.Now(), apiUUID, resourceId, associationType, orgUUID)
 	return err
 }
 
@@ -1060,7 +1712,7 @@ func (r *APIRepo) GetAPIAssociations(apiUUID, associationType, orgUUID string) (
 		FROM api_associations
 		WHERE api_uuid = ? AND association_type = ? AND organization_uuid = ?
 	`
-	rows, err := r.db.Query(query, apiUUID, associationType, orgUUID)
+	rows, err := r.db.Query(r.db.Rebind(query), apiUUID, associationType, orgUUID)
 	if err != nil {
 		return nil, err
 	}
@@ -1097,16 +1749,17 @@ func (r *APIRepo) GetAPIGatewaysWithDetails(apiUUID, orgUUID string) ([]*model.A
 			g.updated_at,
 			aa.created_at as associated_at,
 			aa.updated_at as association_updated_at,
-			CASE WHEN ad.id IS NOT NULL THEN 1 ELSE 0 END as is_deployed,
-			ad.created_at as deployed_at
+			CASE WHEN ad.deployment_id IS NOT NULL THEN 1 ELSE 0 END as is_deployed,
+			ad.deployment_id,
+			ad.updated_at as deployed_at
 		FROM gateways g
-		INNER JOIN api_associations aa ON g.uuid = aa.resource_uuid AND association_type = 'gateway'
-		LEFT JOIN api_deployments ad ON g.uuid = ad.gateway_uuid AND ad.api_uuid = ?
+		INNER JOIN api_associations aa ON g.uuid = aa.resource_uuid AND aa.association_type = 'gateway'
+		LEFT JOIN api_deployment_status ad ON g.uuid = ad.gateway_uuid AND ad.api_uuid = ? AND ad.status = ?
 		WHERE aa.api_uuid = ? AND g.organization_uuid = ?
 		ORDER BY aa.created_at DESC
 	`
 
-	rows, err := r.db.Query(query, apiUUID, apiUUID, orgUUID)
+	rows, err := r.db.Query(r.db.Rebind(query), apiUUID, string(model.DeploymentStatusDeployed), apiUUID, orgUUID)
 	if err != nil {
 		return nil, err
 	}
@@ -1115,7 +1768,8 @@ func (r *APIRepo) GetAPIGatewaysWithDetails(apiUUID, orgUUID string) ([]*model.A
 	var gateways []*model.APIGatewayWithDetails
 	for rows.Next() {
 		gateway := &model.APIGatewayWithDetails{}
-		var deployedAt *time.Time
+		var deployedAt sql.NullTime
+		var deploymentId sql.NullString
 
 		err := rows.Scan(
 			&gateway.ID,
@@ -1132,17 +1786,19 @@ func (r *APIRepo) GetAPIGatewaysWithDetails(apiUUID, orgUUID string) ([]*model.A
 			&gateway.AssociatedAt,
 			&gateway.AssociationUpdatedAt,
 			&gateway.IsDeployed,
+			&deploymentId,
 			&deployedAt,
 		)
 		if err != nil {
 			return nil, err
 		}
 
-		gateway.DeployedAt = deployedAt
-		// For now, we don't have revision information in api_deployments table
-		// This can be enhanced when revision support is added
-		gateway.DeployedRevision = nil
-
+		if deploymentId.Valid {
+			gateway.DeploymentID = &deploymentId.String
+		}
+		if deployedAt.Valid {
+			gateway.DeployedAt = &deployedAt.Time
+		}
 		gateways = append(gateways, gateway)
 	}
 
@@ -1170,7 +1826,7 @@ func (r *APIRepo) CheckAPIExistsByNameAndVersionInOrganization(name, version, or
 	}
 
 	var count int
-	err := r.db.QueryRow(query, args...).Scan(&count)
+	err := r.db.QueryRow(r.db.Rebind(query), args...).Scan(&count)
 	if err != nil {
 		return false, err
 	}

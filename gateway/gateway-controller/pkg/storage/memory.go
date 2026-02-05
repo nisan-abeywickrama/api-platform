@@ -41,8 +41,12 @@ type ConfigStore struct {
 	templateIdByHandle map[string]string
 
 	// API Keys storage
-	apiKeys      map[string]*models.APIKey   // Key: API key value → Value: APIKey
-	apiKeysByAPI map[string][]*models.APIKey // Key: "configID" → Value: slice of APIKeys
+	apiKeysByAPI map[string]map[string]*models.APIKey // Key: configID → Value: map[keyID]*APIKey
+
+	externalKeyIndex map[string]map[string]*string // Key: configID → Value: map[indexKey]*string
+
+	// Labels storage
+	labelsByAPI map[string]map[string]string // Key: API handle (metadata.name) → Value: labels map
 }
 
 // NewConfigStore creates a new in-memory config store
@@ -55,8 +59,9 @@ func NewConfigStore() *ConfigStore {
 		TopicManager:       NewTopicManager(),
 		templates:          make(map[string]*models.StoredLLMProviderTemplate),
 		templateIdByHandle: make(map[string]string),
-		apiKeys:            make(map[string]*models.APIKey),
-		apiKeysByAPI:       make(map[string][]*models.APIKey),
+		apiKeysByAPI:       make(map[string]map[string]*models.APIKey),
+		externalKeyIndex:   make(map[string]map[string]*string),
+		labelsByAPI:        make(map[string]map[string]string),
 	}
 }
 
@@ -80,7 +85,16 @@ func (cs *ConfigStore) Add(cfg *models.StoredConfig) error {
 	cs.handle[handle] = cfg.ID
 	cs.nameVersion[key] = cfg.ID
 
-	if cfg.Configuration.Kind == api.Asyncwebsub {
+	// Store labels if present
+	if cfg.Configuration.Metadata.Labels != nil {
+		labelsCopy := make(map[string]string)
+		for k, v := range *cfg.Configuration.Metadata.Labels {
+			labelsCopy[k] = v
+		}
+		cs.labelsByAPI[handle] = labelsCopy
+	}
+
+	if cfg.Configuration.Kind == api.WebSubApi {
 		err := cs.updateTopics(cfg)
 		if err != nil {
 			return err
@@ -127,7 +141,7 @@ func (cs *ConfigStore) Update(cfg *models.StoredConfig) error {
 		cs.nameVersion[newKey] = cfg.ID
 	}
 
-	if cfg.Configuration.Kind == api.Asyncwebsub {
+	if cfg.Configuration.Kind == api.WebSubApi {
 		err := cs.updateTopics(cfg)
 		if err != nil {
 			return err
@@ -135,6 +149,36 @@ func (cs *ConfigStore) Update(cfg *models.StoredConfig) error {
 	}
 
 	cs.configs[cfg.ID] = cfg
+
+	// Store labels with new handle
+	// Check if handles are same(because this is the key of the map)
+	// If same, update the labels or remove the entry if labels are nil
+	// If not same and if the labels are not nil, create a new entry with new handle
+	// else we can ignore it
+	if oldHandle != newHandle {
+		// Remove old handle entry
+		delete(cs.labelsByAPI, oldHandle)
+		if cfg.Configuration.Metadata.Labels != nil {
+			labelsCopy := make(map[string]string)
+			for k, v := range *cfg.Configuration.Metadata.Labels {
+				labelsCopy[k] = v
+			}
+			cs.labelsByAPI[newHandle] = labelsCopy
+		}
+	} else {
+		if cfg.Configuration.Metadata.Labels != nil {
+			labelsCopy := make(map[string]string)
+			for k, v := range *cfg.Configuration.Metadata.Labels {
+				labelsCopy[k] = v
+			}
+			cs.labelsByAPI[oldHandle] = labelsCopy
+		} else {
+			// Remove entry if labels are nil
+			delete(cs.labelsByAPI, oldHandle)
+		}
+
+	}
+
 	return nil
 }
 
@@ -149,11 +193,11 @@ func (cs *ConfigStore) updateTopics(cfg *models.StoredConfig) error {
 
 	apiTopicsPerRevision := make(map[string]bool)
 	for _, topic := range asyncData.Channels {
-		name := strings.TrimPrefix(asyncData.Name, "/")
-		context := strings.TrimPrefix(asyncData.Context, "/")
-		version := strings.TrimPrefix(asyncData.Version, "/")
-		path := strings.TrimPrefix(topic.Path, "/")
-		modifiedTopic := fmt.Sprintf("%s_%s_%s_%s", name, context, version, path)
+		contextWithVersion := strings.ReplaceAll(asyncData.Context, "$version", asyncData.Version)
+		contextWithVersion = strings.TrimPrefix(contextWithVersion, "/")
+		contextWithVersion = strings.ReplaceAll(contextWithVersion, "/", "_")
+		name := strings.TrimPrefix(topic.Name, "/")
+		modifiedTopic := fmt.Sprintf("%s_%s", contextWithVersion, name)
 		cs.TopicManager.Add(cfg.ID, modifiedTopic)
 		apiTopicsPerRevision[modifiedTopic] = true
 	}
@@ -179,12 +223,14 @@ func (cs *ConfigStore) Delete(id string) error {
 	key := cfg.GetCompositeKey()
 	handle := cfg.GetHandle()
 
-	if cfg.Configuration.Kind == api.Asyncwebsub {
+	if cfg.Configuration.Kind == api.WebSubApi {
 		cs.TopicManager.RemoveAllForConfig(cfg.ID)
 	}
 	delete(cs.handle, handle)
 	delete(cs.nameVersion, key)
 	delete(cs.configs, id)
+	// Remove from labels map
+	delete(cs.labelsByAPI, handle)
 	return nil
 }
 
@@ -470,59 +516,76 @@ func (cs *ConfigStore) StoreAPIKey(apiKey *models.APIKey) error {
 
 	// Check if an API key with the same apiId and name already exists
 	existingKeys, apiIdExists := cs.apiKeysByAPI[apiKey.APIId]
-	var existingKeyIndex = -1
-	var oldAPIKeyValue string
+	var existingKeyID = ""
 
 	if apiIdExists {
-		for i, existingKey := range existingKeys {
+		for id, existingKey := range existingKeys {
 			if existingKey.Name == apiKey.Name {
-				existingKeyIndex = i
-				oldAPIKeyValue = existingKey.APIKey
+				existingKeyID = id
 				break
 			}
 		}
 	}
 
-	// Check if the new API key value already exists (but with different apiId/name)
-	if _, keyExists := cs.apiKeys[apiKey.APIKey]; keyExists && oldAPIKeyValue != apiKey.APIKey {
-		return ErrConflict
-	}
-
-	if existingKeyIndex >= 0 {
-		// Update existing API key
-		// Remove old API key value from apiKeys map if it's different
-		if oldAPIKeyValue != apiKey.APIKey {
-			delete(cs.apiKeys, oldAPIKeyValue)
+	if existingKeyID != "" {
+		// Remove old external index entry using the previous key's IndexKey (avoid leaking stale entries after rotation)
+		oldEntry := cs.apiKeysByAPI[apiKey.APIId][existingKeyID]
+		if oldEntry != nil && oldEntry.Source == "external" && oldEntry.IndexKey != nil {
+			if extIndex, ok := cs.externalKeyIndex[apiKey.APIId]; ok && extIndex != nil {
+				delete(extIndex, *oldEntry.IndexKey)
+			}
 		}
-
 		// Update the existing entry in apiKeysByAPI
-		cs.apiKeysByAPI[apiKey.APIId][existingKeyIndex] = apiKey
-
-		// Store by new API key value
-		cs.apiKeys[apiKey.APIKey] = apiKey
+		delete(cs.apiKeysByAPI[apiKey.APIId], existingKeyID)
+		cs.apiKeysByAPI[apiKey.APIId][apiKey.ID] = apiKey // in API key rotation scenario apiKey.ID = existingKeyID
+		if apiKey.Source == "external" {
+			if apiKey.IndexKey == nil {
+				return fmt.Errorf("external API key must have IndexKey set")
+			}
+			if cs.externalKeyIndex[apiKey.APIId] == nil {
+				cs.externalKeyIndex[apiKey.APIId] = make(map[string]*string)
+			}
+			cs.externalKeyIndex[apiKey.APIId][*apiKey.IndexKey] = &apiKey.ID
+		}
 	} else {
 		// Insert new API key
-		// Check if API key value already exists
-		if _, exists := cs.apiKeys[apiKey.APIKey]; exists {
+		// Check if API key ID already exists
+		if _, exists := cs.apiKeysByAPI[apiKey.APIId][apiKey.ID]; exists {
 			return ErrConflict
 		}
 
-		// Store by API key value
-		cs.apiKeys[apiKey.APIKey] = apiKey
+		// Initialize the map for this API ID if it doesn't exist
+		if cs.apiKeysByAPI[apiKey.APIId] == nil {
+			cs.apiKeysByAPI[apiKey.APIId] = make(map[string]*models.APIKey)
+		}
 
-		// Store by API apiId
-		cs.apiKeysByAPI[apiKey.APIId] = append(cs.apiKeysByAPI[apiKey.APIId], apiKey)
+		// Initialize the map for this API ID if it doesn't exist
+		if cs.externalKeyIndex[apiKey.APIId] == nil {
+			cs.externalKeyIndex[apiKey.APIId] = make(map[string]*string)
+		}
+
+		// Store API key by API ID and API key ID and externalKeyIndex
+		cs.apiKeysByAPI[apiKey.APIId][apiKey.ID] = apiKey
+		if apiKey.Source == "external" {
+			if apiKey.IndexKey == nil {
+				return fmt.Errorf("external API key must have IndexKey set")
+			}
+			if cs.externalKeyIndex[apiKey.APIId] == nil {
+				cs.externalKeyIndex[apiKey.APIId] = make(map[string]*string)
+			}
+			cs.externalKeyIndex[apiKey.APIId][*apiKey.IndexKey] = &apiKey.ID
+		}
 	}
 
 	return nil
 }
 
-// GetAPIKeyByKey retrieves an API key by its key value
-func (cs *ConfigStore) GetAPIKeyByKey(key string) (*models.APIKey, error) {
+// GetAPIKeyByID retrieves an API key by its ID
+func (cs *ConfigStore) GetAPIKeyByID(apiId, id string) (*models.APIKey, error) {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
 
-	apiKey, exists := cs.apiKeys[key]
+	apiKey, exists := cs.apiKeysByAPI[apiId][id]
 	if !exists {
 		return nil, ErrNotFound
 	}
@@ -540,10 +603,31 @@ func (cs *ConfigStore) GetAPIKeysByAPI(apiId string) ([]*models.APIKey, error) {
 		return []*models.APIKey{}, nil // Return empty slice instead of nil
 	}
 
-	// Return a copy to prevent external modification
-	result := make([]*models.APIKey, len(apiKeys))
-	copy(result, apiKeys)
+	// Convert map values to slice and return a copy to prevent external modification
+	result := make([]*models.APIKey, 0, len(apiKeys))
+	for _, apiKey := range apiKeys {
+		result = append(result, apiKey)
+	}
 	return result, nil
+}
+
+// CountActiveAPIKeysByUserAndAPI counts active API keys for a specific user and API
+func (cs *ConfigStore) CountActiveAPIKeysByUserAndAPI(apiId, userID string) (int, error) {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+
+	apiKeys, exists := cs.apiKeysByAPI[apiId]
+	if !exists {
+		return 0, nil
+	}
+
+	count := 0
+	for _, apiKey := range apiKeys {
+		if apiKey.CreatedBy == userID && apiKey.Status == models.APIKeyStatusActive {
+			count++
+		}
+	}
+	return count, nil
 }
 
 // GetAPIKeyByName retrieves an API key by its apiId and name
@@ -566,33 +650,36 @@ func (cs *ConfigStore) GetAPIKeyByName(apiId, name string) (*models.APIKey, erro
 	return nil, ErrNotFound
 }
 
-// RemoveAPIKey removes an API key from the in-memory cache
-func (cs *ConfigStore) RemoveAPIKey(apiKey string) error {
+// RemoveAPIKeyByID removes an API key from the in-memory cache by its ID
+func (cs *ConfigStore) RemoveAPIKeyByID(apiId, id string) error {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
 
-	// Get the API key first to find its API association
-	key, exists := cs.apiKeys[apiKey]
+	apiKeys, exists := cs.apiKeysByAPI[apiId]
+	if !exists {
+		return ErrNotFound
+	}
+	apiKey, exists := apiKeys[id]
 	if !exists {
 		return ErrNotFound
 	}
 
-	// Remove from main map
-	delete(cs.apiKeys, apiKey)
+	// Remove from external key index before removing from apiKeysByAPI (need apiKey while still in map)
+	if apiKey != nil && apiKey.Source == "external" && apiKey.IndexKey != nil {
+		if extIndex, ok := cs.externalKeyIndex[apiId]; ok {
+			delete(extIndex, *apiKey.IndexKey)
+		}
+	}
 
-	// Remove from API-specific map
-	if apiKeys, exists := cs.apiKeysByAPI[key.APIId]; exists {
-		for i, k := range apiKeys {
-			if k.APIKey == apiKey {
-				// Remove from slice
-				cs.apiKeysByAPI[key.APIId] = append(apiKeys[:i], apiKeys[i+1:]...)
-				break
-			}
-		}
-		// Clean up empty slices
-		if len(cs.apiKeysByAPI[key.APIId]) == 0 {
-			delete(cs.apiKeysByAPI, key.APIId)
-		}
+	// Remove from apiKeysByAPI map
+	delete(apiKeys, id)
+
+	// Clean up empty maps
+	if len(cs.apiKeysByAPI[apiId]) == 0 {
+		delete(cs.apiKeysByAPI, apiId)
+	}
+	if extIndex, ok := cs.externalKeyIndex[apiId]; ok && len(extIndex) == 0 {
+		delete(cs.externalKeyIndex, apiId)
 	}
 
 	return nil
@@ -603,59 +690,31 @@ func (cs *ConfigStore) RemoveAPIKeysByAPI(apiId string) error {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
 
-	apiKeys, exists := cs.apiKeysByAPI[apiId]
+	_, exists := cs.apiKeysByAPI[apiId]
 	if !exists {
 		return nil // No keys to remove
 	}
 
-	// Remove from main map
-	for _, key := range apiKeys {
-		delete(cs.apiKeys, key.APIKey)
-	}
-
 	// Remove from API-specific map
 	delete(cs.apiKeysByAPI, apiId)
-
+	delete(cs.externalKeyIndex, apiId)
 	return nil
 }
 
-// RemoveAPIKeyByName removes an API key from the in-memory cache by its apiId and name
-func (cs *ConfigStore) RemoveAPIKeyByName(apiId, name string) error {
+// GetLabels retrieves labels for an API
+func (cs *ConfigStore) GetLabelsMap(handle string) (map[string]string, error) {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
-
-	// Get API keys for the apiId
-	apiKeys, exists := cs.apiKeysByAPI[apiId]
+	labels, exists := cs.labelsByAPI[handle]
 	if !exists {
-		return ErrNotFound
+		return nil, ErrNotFound
 	}
 
-	// Find the API key with the matching name
-	var targetAPIKey *models.APIKey
-	var targetIndex = -1
-
-	for i, apiKey := range apiKeys {
-		if apiKey.Name == name {
-			targetAPIKey = apiKey
-			targetIndex = i
-			break
-		}
+	// Return a copy to prevent external modification
+	labelsCopy := make(map[string]string)
+	for k, v := range labels {
+		labelsCopy[k] = v
 	}
 
-	if targetAPIKey == nil {
-		return ErrNotFound
-	}
-
-	// Remove from main apiKeys map
-	delete(cs.apiKeys, targetAPIKey.APIKey)
-
-	// Remove from apiKeysByAPI slice
-	cs.apiKeysByAPI[apiId] = append(apiKeys[:targetIndex], apiKeys[targetIndex+1:]...)
-
-	// Clean up empty slices
-	if len(cs.apiKeysByAPI[apiId]) == 0 {
-		delete(cs.apiKeysByAPI, apiId)
-	}
-
-	return nil
+	return labelsCopy, nil
 }

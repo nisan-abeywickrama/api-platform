@@ -63,9 +63,13 @@ func StartPlatformAPIServer(cfg *config.Server) (*Server, error) {
 		return nil, err
 	}
 
-	// Initialize schema
-	if err := db.InitSchema(cfg.DBSchemaPath); err != nil {
-		return nil, err
+	// Initialize schema (skip when ExecuteSchemaDDL is false, e.g. deployed Postgres without DDL access)
+	if cfg.Database.ExecuteSchemaDDL {
+		if err := db.InitSchema(cfg.DBSchemaPath); err != nil {
+			return nil, err
+		}
+	} else {
+		log.Printf("Skipping schema DDL execution (DATABASE_EXECUTE_SCHEMA_DDL=false)\n")
 	}
 
 	// Initialize repositories
@@ -99,8 +103,10 @@ func StartPlatformAPIServer(cfg *config.Server) (*Server, error) {
 	apiService := service.NewAPIService(apiRepo, projectRepo, orgRepo, gatewayRepo, devPortalRepo, publicationRepo,
 		backendServiceRepo, upstreamService, gatewayEventsService, devPortalService, apiUtil)
 	gatewayService := service.NewGatewayService(gatewayRepo, orgRepo, apiRepo)
-	internalGatewayService := service.NewGatewayInternalAPIService(apiRepo, gatewayRepo, orgRepo, projectRepo, upstreamService)
+	internalGatewayService := service.NewGatewayInternalAPIService(apiRepo, gatewayRepo, orgRepo, projectRepo, upstreamService, cfg)
+	apiKeyService := service.NewAPIKeyService(apiRepo, gatewayEventsService)
 	gitService := service.NewGitService()
+	deploymentService := service.NewDeploymentService(apiRepo, gatewayRepo, backendServiceRepo, orgRepo, gatewayEventsService, apiUtil, cfg)
 
 	// Initialize handlers
 	orgHandler := handler.NewOrganizationHandler(orgService)
@@ -110,7 +116,9 @@ func StartPlatformAPIServer(cfg *config.Server) (*Server, error) {
 	gatewayHandler := handler.NewGatewayHandler(gatewayService)
 	wsHandler := handler.NewWebSocketHandler(wsManager, gatewayService, cfg.WebSocket.RateLimitPerMin)
 	internalGatewayHandler := handler.NewGatewayInternalAPIHandler(gatewayService, internalGatewayService)
+	apiKeyHandler := handler.NewAPIKeyHandler(apiKeyService)
 	gitHandler := handler.NewGitHandler(gitService)
+	deploymentHandler := handler.NewDeploymentHandler(deploymentService)
 
 	// Setup router
 	router := gin.Default()
@@ -140,7 +148,9 @@ func StartPlatformAPIServer(cfg *config.Server) (*Server, error) {
 	gatewayHandler.RegisterRoutes(router)
 	wsHandler.RegisterRoutes(router)
 	internalGatewayHandler.RegisterRoutes(router)
+	apiKeyHandler.RegisterRoutes(router)
 	gitHandler.RegisterRoutes(router)
+	deploymentHandler.RegisterRoutes(router)
 
 	log.Printf("[INFO] WebSocket manager initialized: maxConnections=%d heartbeatTimeout=%ds rateLimitPerMin=%d",
 		cfg.WebSocket.MaxConnections, cfg.WebSocket.ConnectionTimeout, cfg.WebSocket.RateLimitPerMin)

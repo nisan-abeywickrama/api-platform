@@ -33,6 +33,8 @@ import (
 	"github.com/wso2/api-platform/gateway/policy-engine/internal/kernel"
 	"github.com/wso2/api-platform/gateway/policy-engine/internal/metrics"
 	"github.com/wso2/api-platform/gateway/policy-engine/internal/registry"
+	// TODO: Migrate to common/apikey for better architecture
+	// Currently using policy/v1alpha store to ensure validation and xDS use the same instance
 	policy "github.com/wso2/api-platform/sdk/gateway/policy/v1alpha"
 	policyenginev1 "github.com/wso2/api-platform/sdk/gateway/policyengine/v1"
 )
@@ -47,20 +49,25 @@ type StoredPolicyConfig struct {
 
 // ResourceHandler handles xDS resource updates
 type ResourceHandler struct {
-	kernel        *kernel.Kernel
-	registry      *registry.PolicyRegistry
-	configLoader  *kernel.ConfigLoader
-	apiKeyHandler *APIKeyOperationHandler
+	kernel             *kernel.Kernel
+	registry           *registry.PolicyRegistry
+	configLoader       *kernel.ConfigLoader
+	apiKeyHandler      *APIKeyOperationHandler
+	lazyResourceHandler *LazyResourceHandler
 }
 
 // NewResourceHandler creates a new ResourceHandler
 func NewResourceHandler(k *kernel.Kernel, reg *registry.PolicyRegistry) *ResourceHandler {
+	// TODO: Migrate to common/apikey.GetAPIkeyStoreInstance() for better architecture
+	// Currently using policy/v1alpha store to ensure validation and xDS use the same singleton instance
 	apiKeyStore := policy.GetAPIkeyStoreInstance()
+	lazyResourceStore := policy.GetLazyResourceStoreInstance()
 	return &ResourceHandler{
-		kernel:        k,
-		registry:      reg,
-		configLoader:  kernel.NewConfigLoader(k, reg),
-		apiKeyHandler: NewAPIKeyOperationHandler(apiKeyStore, slog.Default()),
+		kernel:              k,
+		registry:            reg,
+		configLoader:        kernel.NewConfigLoader(k, reg),
+		apiKeyHandler:       NewAPIKeyOperationHandler(apiKeyStore, slog.Default()),
+		lazyResourceHandler: NewLazyResourceHandler(lazyResourceStore, slog.Default()),
 	}
 }
 
@@ -242,6 +249,7 @@ func (h *ResourceHandler) buildPolicyChain(routeKey string, config *policyengine
 
 	requiresRequestBody := false
 	requiresResponseBody := false
+	hasExecutionConditions := false
 
 	for _, policyConfig := range config.Policies {
 		// Create metadata with route and API information
@@ -250,6 +258,13 @@ func (h *ResourceHandler) buildPolicyChain(routeKey string, config *policyengine
 			APIId:      apiMetadata.APIId,
 			APIName:    apiMetadata.APIName,
 			APIVersion: apiMetadata.Version,
+		}
+
+		// Check if attachedTo is present in parameters and set it in metadata
+		if val, ok := policyConfig.Parameters["attachedTo"]; ok {
+			if attachedTo, ok := val.(string); ok {
+				metadata.AttachedTo = policy.Level(attachedTo)
+			}
 		}
 
 		// Create instance using factory with metadata and params
@@ -269,6 +284,11 @@ func (h *ResourceHandler) buildPolicyChain(routeKey string, config *policyengine
 			Parameters: policy.PolicyParameters{
 				Raw: mergedParams,
 			},
+		}
+
+		// Check if policy has CEL execution condition
+		if policyConfig.ExecutionCondition != nil && *policyConfig.ExecutionCondition != "" {
+			hasExecutionConditions = true
 		}
 
 		// Add to policy list
@@ -294,6 +314,7 @@ func (h *ResourceHandler) buildPolicyChain(routeKey string, config *policyengine
 		PolicySpecs:          policySpecs,
 		RequiresRequestBody:  requiresRequestBody,
 		RequiresResponseBody: requiresResponseBody,
+		HasExecutionConditions:     hasExecutionConditions,
 	}
 
 	return chain, nil

@@ -43,14 +43,15 @@ fi
 if [ "$COMPONENT" = "gateway" ]; then
     # Update Chart.yaml - appVersion
     sed -i.bak "s/^appVersion:.*/appVersion: \"$VERSION\"/" "$CHART_FILE"
+    rm -f "$CHART_FILE.bak"
 
     # Update values.yaml - repository AND tags for gateway components
-    # Use macOS-compatible sed syntax
+    # Note: tags are quoted in values.yaml (e.g., tag: "0.4.0")
     sed -i.bak \
         -e "s|repository: .*/gateway-controller|repository: ${DOCKER_REGISTRY}/gateway-controller|" \
         -e "s|repository: .*/policy-engine|repository: ${DOCKER_REGISTRY}/policy-engine|" \
         -e "s|repository: .*/gateway-router|repository: ${DOCKER_REGISTRY}/gateway-router|" \
-        -e "s|tag: [0-9].*$|tag: $VERSION|g" \
+        -e "s|tag: \"[0-9][^\"]*\"|tag: \"$VERSION\"|g" \
         "$VALUES_FILE"
     rm -f "$VALUES_FILE.bak"
 

@@ -37,9 +37,6 @@ type API struct {
 	LifeCycleStatus  string              `json:"lifeCycleStatus,omitempty" db:"lifecycle_status"`
 	HasThumbnail     bool                `json:"hasThumbnail,omitempty" db:"has_thumbnail"`
 	IsDefaultVersion bool                `json:"isDefaultVersion,omitempty" db:"is_default_version"`
-	IsRevision       bool                `json:"isRevision,omitempty" db:"is_revision"`
-	RevisionedAPIID  string              `json:"revisionedApiId,omitempty" db:"revisioned_api_id"`
-	RevisionID       int                 `json:"revisionId,omitempty" db:"revision_id"`
 	Type             string              `json:"type,omitempty" db:"type"`
 	Transport        []string            `json:"transport,omitempty" db:"transport"`
 	MTLS             *MTLSConfig         `json:"mtls,omitempty"`
@@ -47,7 +44,9 @@ type API struct {
 	CORS             *CORSConfig         `json:"cors,omitempty"`
 	BackendServices  []BackendService    `json:"backend-services,omitempty"`
 	APIRateLimiting  *RateLimitingConfig `json:"api-rate-limiting,omitempty"`
+	Policies         []Policy            `json:"policies,omitempty"`
 	Operations       []Operation         `json:"operations,omitempty"`
+	Channels         []Channel           `json:"channels,omitempty"`
 }
 
 // TableName returns the table name for the API model
@@ -76,9 +75,18 @@ type MTLSConfig struct {
 
 // SecurityConfig represents security configuration
 type SecurityConfig struct {
-	Enabled bool            `json:"enabled,omitempty"`
-	APIKey  *APIKeySecurity `json:"apiKey,omitempty"`
-	OAuth2  *OAuth2Security `json:"oauth2,omitempty"`
+	Enabled       bool                   `json:"enabled,omitempty"`
+	APIKey        *APIKeySecurity        `json:"apiKey,omitempty"`
+	OAuth2        *OAuth2Security        `json:"oauth2,omitempty"`
+	XHubSignature *XHubSignatureSecurity `json:"xHubSignature,omitempty"`
+}
+
+// XHubSignature represents X-Hub-Signature security configuration
+type XHubSignatureSecurity struct {
+	Enabled   bool   `json:"enabled,omitempty"`
+	Header    string `json:"header,omitempty"`
+	Secret    string `json:"secret,omitempty"`
+	Algorithm string `json:"algorithm,omitempty"`
 }
 
 // APIKeySecurity represents API key security configuration
@@ -213,10 +221,26 @@ type Operation struct {
 	Request     *OperationRequest `json:"request,omitempty"`
 }
 
+// Channel represents an API channel
+type Channel struct {
+	Name        string          `json:"name,omitempty"`
+	Description string          `json:"description,omitempty"`
+	Request     *ChannelRequest `json:"request,omitempty"`
+}
+
 // OperationRequest represents operation request details
 type OperationRequest struct {
 	Method          string                `json:"method,omitempty"`
 	Path            string                `json:"path,omitempty"`
+	BackendServices []BackendRouting      `json:"backend-services,omitempty"`
+	Authentication  *AuthenticationConfig `json:"authentication,omitempty"`
+	Policies        []Policy              `json:"policies,omitempty"`
+}
+
+// ChannelRequest represents channel request details
+type ChannelRequest struct {
+	Method          string                `json:"method,omitempty"`
+	Name            string                `json:"name,omitempty"`
 	BackendServices []BackendRouting      `json:"backend-services,omitempty"`
 	Authentication  *AuthenticationConfig `json:"authentication,omitempty"`
 	Policies        []Policy              `json:"policies,omitempty"`
@@ -242,13 +266,24 @@ type Policy struct {
 	Version            string                  `json:"version"`
 }
 
-// APIDeployment represents an API deployment record
+// APIDeployment represents an immutable API deployment artifact
+// Status and UpdatedAt are populated from api_deployment_status table via JOIN
+// If Status is nil, the deployment is ARCHIVED (not currently active or undeployed)
 type APIDeployment struct {
-	ID             int       `json:"id,omitempty" db:"id"`
-	ApiID          string    `json:"apiId" db:"api_uuid"`
-	OrganizationID string    `json:"organizationId" db:"organization_uuid"`
-	GatewayID      string    `json:"gatewayId" db:"gateway_uuid"`
-	CreatedAt      time.Time `json:"createdAt,omitempty" db:"created_at"`
+	DeploymentID     string                 `json:"deploymentId" db:"deployment_id"`
+	Name             string                 `json:"name" db:"name"`
+	ApiID            string                 `json:"apiId" db:"api_uuid"`
+	OrganizationID   string                 `json:"organizationId" db:"organization_uuid"`
+	GatewayID        string                 `json:"gatewayId" db:"gateway_uuid"`
+	BaseDeploymentID *string                `json:"baseDeploymentId,omitempty" db:"base_deployment_id"`
+	Content          []byte                 `json:"-" db:"content"`
+	Metadata         map[string]interface{} `json:"metadata,omitempty" db:"metadata"`
+	CreatedAt        time.Time              `json:"createdAt" db:"created_at"`
+	
+	// Lifecycle state fields (from api_deployment_status table via JOIN)
+	// nil values indicate ARCHIVED state (no record in status table)
+	Status    *DeploymentStatus `json:"status,omitempty" db:"status"`
+	UpdatedAt *time.Time        `json:"updatedAt,omitempty" db:"status_updated_at"`
 }
 
 // TableName returns the table name for the APIDeployment model
@@ -258,7 +293,7 @@ func (APIDeployment) TableName() string {
 
 // APIAssociation represents the association between an API and a resource (gateway or dev portal)
 type APIAssociation struct {
-	ID              int       `json:"id" db:"id"`
+	ID              int64     `json:"id" db:"id"`
 	ApiID           string    `json:"apiId" db:"api_uuid"`
 	OrganizationID  string    `json:"organizationId" db:"organization_uuid"`
 	ResourceID      string    `json:"resourceId" db:"resource_uuid"`
@@ -271,3 +306,13 @@ type APIAssociation struct {
 func (APIAssociation) TableName() string {
 	return "api_associations"
 }
+
+// DeploymentStatus represents the status of an API deployment
+// Note: ARCHIVED is a derived state (not stored in database)
+type DeploymentStatus string
+
+const (
+	DeploymentStatusDeployed   DeploymentStatus = "DEPLOYED"
+	DeploymentStatusUndeployed DeploymentStatus = "UNDEPLOYED"
+	DeploymentStatusArchived   DeploymentStatus = "ARCHIVED" // Derived state: exists in history but not in status table
+)

@@ -7,6 +7,9 @@ ARG TARGETARCH
 ARG VERSION=0.0.1-SNAPSHOT
 ARG GIT_COMMIT=unknown
 
+# Coverage build argument - set to "true" for coverage-instrumented builds
+ARG ENABLE_COVERAGE=false
+
 WORKDIR /build
 
 # Install build dependencies for SQLite (CGO requirement)
@@ -22,21 +25,26 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     fi \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy SDK (needed for go.mod replace directive)
-COPY --from=sdk . /sdk
+# Copy go mod files for dependencies (needed for go.mod replace directive)
+# Copying only the mod files first ensures that the go mod download cache 
+# is only invalidated when dependencies change, not when source code changes.
+COPY --from=sdk go.mod go.sum /sdk/
+COPY --from=common go.mod go.sum /common/
 
-# Copy common (needed for go.mod replace directive)
-COPY --from=common . /common
-
-# Copy go mod files
+# Copy main component go mod files
 COPY go.mod go.sum ./
 RUN go mod download
 
-# Copy source code
+# Copy full source code for SDK and Common
+COPY --from=sdk . /sdk
+COPY --from=common . /common
+
+# Copy component source code
 COPY . ./
 
 # Build the binary with CGO enabled (required for mattn/go-sqlite3)
 # Set CC for cross-compilation based on target architecture
+# Add -cover flag when ENABLE_COVERAGE=true for coverage instrumentation
 RUN if [ "$TARGETARCH" = "amd64" ]; then \
         export CC=x86_64-linux-gnu-gcc; \
     elif [ "$TARGETARCH" = "arm64" ]; then \
@@ -44,10 +52,15 @@ RUN if [ "$TARGETARCH" = "amd64" ]; then \
     else \
         export CC=gcc; \
     fi && \
+    if [ "$ENABLE_COVERAGE" = "true" ]; then \
+        COVER_FLAG="-cover"; \
+    else \
+        COVER_FLAG=""; \
+    fi && \
     CGO_ENABLED=1 \
     GOOS=linux \
     GOARCH=${TARGETARCH} \
-    go build -a \
+    go build $COVER_FLAG -a \
     -ldflags "-X main.Version=${VERSION} \
               -X main.GitCommit=${GIT_COMMIT} \
               -X main.BuildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
@@ -56,6 +69,9 @@ RUN if [ "$TARGETARCH" = "amd64" ]; then \
 # Stage 2: Create minimal runtime image
 # Using Debian slim for glibc compatibility with builder stage
 FROM debian:bookworm-slim
+
+# Re-declare ARG after FROM to use it in this stage
+ARG ENABLE_COVERAGE=false
 
 # Install runtime dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -74,11 +90,20 @@ COPY --from=builder /build/controller .
 # Copy policy definitions
 COPY default-policies /app/default-policies
 
+# Copy lua scripts
+COPY lua /app/lua
+
 # Copy default llm provider templates
 COPY default-llm-provider-templates /app/default-llm-provider-templates
 
 # Create data directory for SQLite database
 RUN mkdir -p /app/data
+
+# Create coverage output directory if coverage is enabled
+RUN if [ "$ENABLE_COVERAGE" = "true" ]; then mkdir -p /coverage; fi
+
+# Set GOCOVERDIR for coverage data collection (only effective when binary is built with -cover)
+ENV GOCOVERDIR=/coverage
 
 # Expose ports
 EXPOSE 9090 18000

@@ -20,13 +20,20 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
-	"github.com/knadh/koanf/parsers/yaml"
+	"github.com/go-viper/mapstructure/v2"
+	toml "github.com/knadh/koanf/parsers/toml/v2"
 	"github.com/knadh/koanf/providers/env"
 	"github.com/knadh/koanf/providers/file"
 	"github.com/knadh/koanf/v2"
+)
+
+const (
+	// EnvPrefix is the prefix for environment variables used to configure the policy engine
+	EnvPrefix = "APIP_GW_"
 )
 
 type Config struct {
@@ -43,6 +50,9 @@ type AnalyticsConfig struct {
 	Publishers           []PublisherConfig       `koanf:"publishers"`
 	GRPCAccessLogCfg     map[string]interface{}  `koanf:"grpc_access_logs"`
 	AccessLogsServiceCfg AccessLogsServiceConfig `koanf:"access_logs_service"`
+	// AllowPayloads controls whether request and response bodies are captured
+	// into analytics metadata and forwarded to analytics publishers.
+	AllowPayloads bool `koanf:"allow_payloads"`
 }
 
 // PublisherConfig holds publisher configuration
@@ -203,22 +213,26 @@ type AccessLogsServiceConfig struct {
 
 // Load loads configuration from file, environment variables, and defaults
 // Priority: Environment variables > Config file > Defaults
+//
+// The configuration supports Go-style duration strings (e.g., "10s", "5m", "1h")
+// for all duration fields. The DecodeHook automatically converts string durations
+// to time.Duration values before assignment.
 func Load(configPath string) (*Config, error) {
 	cfg := defaultConfig()
+
 	k := koanf.New(".")
 
 	// Load config file if path is provided
 	if configPath != "" {
-		if err := k.Load(file.Provider(configPath), yaml.Parser()); err != nil {
+		if err := k.Load(file.Provider(configPath), toml.Parser()); err != nil {
 			return nil, fmt.Errorf("failed to load config file: %w", err)
 		}
 	}
 
-	// Load environment variables with PE_ prefix
+	// Load environment variables with the prefix
 	// Double underscores (__) preserve literal underscores in field names
-	// Example: PE_POLICY__ENGINE_SERVER_EXTPROC__PORT -> policy_engine.server.extproc_port
-	if err := k.Load(env.Provider("PE_", ".", func(s string) string {
-		s = strings.TrimPrefix(s, "PE_")
+	if err := k.Load(env.Provider(EnvPrefix, ".", func(s string) string {
+		s = strings.TrimPrefix(s, EnvPrefix)
 		s = strings.ToLower(s)
 
 		// Step 1: Preserve literal underscores with placeholder
@@ -232,8 +246,16 @@ func Load(configPath string) (*Config, error) {
 		return nil, fmt.Errorf("failed to load environment variables: %w", err)
 	}
 
-	// Unmarshal into Config struct
-	if err := k.Unmarshal("", cfg); err != nil {
+	// Unmarshal into pre-populated config struct with defaults
+	// Koanf will merge: fields from file/env overwrite defaults, unset fields keep defaults
+	if err := k.UnmarshalWithConf("", cfg, koanf.UnmarshalConf{
+		DecoderConfig: &mapstructure.DecoderConfig{
+			TagName:          "koanf",
+			WeaklyTypedInput: true,
+			Result:           cfg,
+			DecodeHook:       mapstructure.StringToTimeDurationHookFunc(),
+		},
+	}); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal config: %w", err)
 	}
 
@@ -258,18 +280,18 @@ func defaultConfig() *Config {
 			Admin: AdminConfig{
 				Enabled:    true,
 				Port:       9002,
-				AllowedIPs: []string{"127.0.0.1", "::1"},
+				AllowedIPs: []string{"*"},
 			},
 			Metrics: MetricsConfig{
 				Enabled: false,
 				Port:    9003,
 			},
 			ConfigMode: ConfigModeConfig{
-				Mode: "file",
+				Mode: "xds",
 			},
 			XDS: XDSConfig{
-				Enabled:               false,
-				ServerAddress:         "localhost:18000",
+				Enabled:               true,
+				ServerAddress:         "gateway-controller:18001",
 				NodeID:                "policy-engine",
 				Cluster:               "policy-engine-cluster",
 				ConnectTimeout:        10 * time.Second,
@@ -281,7 +303,7 @@ func defaultConfig() *Config {
 				},
 			},
 			FileConfig: FileConfigConfig{
-				Path: "configs/policy-chains.yaml",
+				Path: "",
 			},
 			Logging: LoggingConfig{
 				Level:  "info",
@@ -309,6 +331,7 @@ func defaultConfig() *Config {
 				ExtProcMaxMessageSize: 1000000000,
 				ExtProcMaxHeaderLimit: 8192,
 			},
+			AllowPayloads: false,
 		},
 		TracingConfig: TracingConfig{
 			Enabled:            false,
@@ -505,6 +528,18 @@ func (c *Config) validateAnalyticsConfig() error {
 						}
 					default:
 						return fmt.Errorf("analytics.publishers[%d].settings.publish_interval must be an integer (seconds) when set", i)
+					}
+				}
+
+				if rawBaseURL, ok := pub.Settings["moesif_base_url"]; ok && rawBaseURL != nil {
+					baseURL, okStr := rawBaseURL.(string)
+					if !okStr {
+						return fmt.Errorf("analytics.publishers[%d].settings.moesif_base_url must be a string", i)
+					}
+					if baseURL != "" {
+						if u, err := url.Parse(baseURL); err != nil || u.Scheme == "" || u.Host == "" {
+							return fmt.Errorf("analytics.publishers[%d].settings.moesif_base_url must be a valid URL (e.g. https://api.moesif.net), got %q", i, baseURL)
+						}
 					}
 				}
 			default:

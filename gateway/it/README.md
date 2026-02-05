@@ -94,12 +94,14 @@ gateway/it/
 # Run all tests
 make test-all
 
-# Run with Go directly
-go test -v ./...
+# Run with Go directly (with extended timeout for coverage builds)
+go test -v -timeout 30m ./...
 
 # Run specific scenario (use @tag)
-go test -v ./... -godog.tags="@wip"
+go test -v -timeout 30m ./... -godog.tags="@wip"
 ```
+
+**Note:** The default Go test timeout is 10 minutes. The full integration test suite with coverage instrumentation typically takes longer to complete, so a 30-minute timeout is recommended.
 
 ## Test Reports
 
@@ -107,10 +109,10 @@ After running tests, reports are available at:
 
 | Report | Location |
 |--------|----------|
-| Test Results (JSON) | `reports/test-results.json` |
-| Coverage Summary | `coverage/coverage.txt` |
-| Coverage HTML | `coverage/coverage.html` |
-| Coverage JSON | `coverage/coverage-report.json` |
+| Test Results (JSON) | `reports/integration-test-results.json` |
+| Coverage Summary | `coverage/integration-test-coverage.txt` |
+| Coverage HTML | `coverage/integration-test-coverage.html` |
+| Coverage JSON | `coverage/integration-test-coverage-report.json` |
 
 ## Example Test Scenario
 

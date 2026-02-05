@@ -18,6 +18,7 @@
 package publishers
 
 import (
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -32,20 +33,24 @@ import (
 )
 
 const (
-	anonymous = "anonymous"
+	anonymous         = "anonymous"
+	userIDPropertyKey = "x-wso2-user-id"
 )
 
 // Moesif represents a Moesif publisher.
 type Moesif struct {
-	cfg    *config.PublisherConfig
-	api    moesifapi.API
-	events []*models.EventModel
-	mu     sync.Mutex
+	cfg      *config.PublisherConfig
+	api      moesifapi.API
+	events   []*models.EventModel
+	mu       sync.Mutex
+	done     chan struct{}
+	closeOnce sync.Once
 }
 
 // MoesifConfig holds the configs specific for the Moesif publisher.
 type MoesifConfig struct {
 	ApplicationID      string `mapstructure:"application_id" default:""`
+	BaseURL            string `mapstructure:"moesif_base_url"`
 	PublishInterval    int    `mapstructure:"publish_interval" default:"5"`
 	EventQueueSize     int    `mapstructure:"event_queue_size" default:"10000"`
 	BatchSize          int    `mapstructure:"batch_size" default:"50"`
@@ -68,35 +73,63 @@ func NewMoesif(pubCfg *config.PublisherConfig) *Moesif {
 		moesifApplicationId = moesifCfg.ApplicationID
 	}
 
+	// Apply default for BaseURL if not set
+	if moesifCfg.BaseURL == "" {
+		slog.Debug("No Moesif base URL provided, backing off to the default URL")
+		moesifCfg.BaseURL = "https://api.moesif.net"
+	}
+
 	// Moesif Client Configs
 	eventQueueSize, batchSize, timerWakeupSeconds :=
 		moesifCfg.EventQueueSize,
 		moesifCfg.BatchSize,
 		moesifCfg.TimerWakeupSeconds
 
-	apiClient := moesifapi.NewAPI(moesifApplicationId, nil, eventQueueSize, batchSize, timerWakeupSeconds)
+	var apiEndpoint *string
+	if moesifCfg.BaseURL != "" {
+		apiEndpoint = &moesifCfg.BaseURL
+	}
+	apiClient := moesifapi.NewAPI(moesifApplicationId, apiEndpoint, eventQueueSize, batchSize, timerWakeupSeconds)
 	moesif := &Moesif{
 		cfg:    pubCfg,
 		events: []*models.EventModel{},
 		api:    apiClient,
 		mu:     sync.Mutex{},
+		done:   make(chan struct{}),
 	}
 	go func() {
+		ticker := time.NewTicker(time.Duration(moesifCfg.PublishInterval) * time.Second)
+		defer ticker.Stop()
 		for {
-			time.Sleep(time.Duration(moesifCfg.PublishInterval) * time.Second)
-			moesif.mu.Lock()
-			if len(moesif.events) > 0 {
-				slog.Info(fmt.Sprintf("Publishing %d events to Moesif", len(moesif.events)))
-				err := moesif.api.QueueEvents(moesif.events)
-				if err != nil {
-					slog.Error("Error publishing events to Moesif", "error", err)
+			select {
+			case <-moesif.done:
+				return
+			case <-ticker.C:
+				moesif.mu.Lock()
+				if len(moesif.events) > 0 {
+					slog.Info(fmt.Sprintf("Publishing %d events to Moesif", len(moesif.events)))
+					err := moesif.api.QueueEvents(moesif.events)
+					if err != nil {
+						slog.Error("Error publishing events to Moesif", "error", err)
+					}
+					moesif.events = []*models.EventModel{}
 				}
-				moesif.events = []*models.EventModel{}
+				moesif.mu.Unlock()
 			}
-			moesif.mu.Unlock()
 		}
 	}()
 	return moesif
+}
+
+// Close stops the background publishing goroutine.
+// It should be called when the Moesif publisher is no longer needed.
+// Safe to call multiple times.
+func (m *Moesif) Close() {
+	m.closeOnce.Do(func() {
+		if m.done != nil {
+			close(m.done)
+		}
+	})
 }
 
 // Publish publishes an event to Moesif.
@@ -109,29 +142,61 @@ func (m *Moesif) Publish(event *dto.Event) {
 		uri = event.Operation.APIResourceTemplate
 	}
 
+	// Build request headers: prefer dynamic headers from event.Properties["requestHeaders"]
+	// if present; otherwise, fall back to the existing hardcoded headers.
+	defaultReqHeaders := map[string]interface{}{
+		"User-Agent":   event.UserAgentHeader,
+		"Content-Type": "-",
+	}
+
+	defaultRspHeaders := map[string]interface{}{
+		"Vary":          "Accept-Encoding",
+		"Pragma":        "no-cache",
+		"Expires":       "-1",
+		"Content-Type":  "-",
+		"Cache-Control": "no-cache",
+	}
+
+	headers := defaultReqHeaders
+	if rawReqHeaders, ok := event.Properties["requestHeaders"]; ok && rawReqHeaders != nil {
+		slog.Debug("Request headers (PUBLISHER): ", "requestHeaders", rawReqHeaders)
+		if jsonStr, ok := rawReqHeaders.(string); ok {
+			var hMap map[string]interface{}
+			if err := json.Unmarshal([]byte(jsonStr), &hMap); err == nil && len(hMap) > 0 {
+				slog.Debug("Unmarshalled hMap (PUBLISHER): ", "requestHeaders", hMap)
+				headers = hMap
+			} else if err != nil {
+				slog.Warn("Failed to unmarshal request headers", "error", err)
+			}
+		}
+	}
+
+	rspHeaders := defaultRspHeaders
+	if rawRspHeaders, ok := event.Properties["responseHeaders"]; ok && rawRspHeaders != nil {
+		slog.Debug("Response headers (PUBLISHER): ", "responseHeaders", rawRspHeaders)
+		if jsonStr, ok := rawRspHeaders.(string); ok {
+			var hMap map[string]interface{}
+			if err := json.Unmarshal([]byte(jsonStr), &hMap); err == nil && len(hMap) > 0 {
+				slog.Debug("Unmarshalled hMap (PUBLISHER): ", "responseHeaders", hMap)
+				rspHeaders = hMap
+			} else if err != nil {
+				slog.Warn("Failed to unmarshal response headers", "error", err)
+			}
+		}
+	}
+
 	req := models.EventRequestModel{
 		Time:       &event.RequestTimestamp,
 		Uri:        uri,
 		Verb:       event.Operation.APIMethod,
 		ApiVersion: &event.API.APIVersion,
 		IpAddress:  &event.UserIP,
-		Headers: map[string]interface{}{ // TODO (osura): Need to populate them dynamically
-			"User-Agent":   event.UserAgentHeader,
-			"Content-Type": "application/json",
-		},
-		Body: nil,
+		Headers:    headers,
+		Body:       nil,
 	}
 	respTime := event.RequestTimestamp
 	if event.Latencies != nil {
 		respTime = event.RequestTimestamp.Add(time.Duration(event.Latencies.ResponseLatency) * time.Millisecond)
-	}
-
-	rspHeaders := map[string]string{ //TODO (osura): Need to populate them dynamically
-		"Vary":          "Accept-Encoding",
-		"Pragma":        "no-cache",
-		"Expires":       "-1",
-		"Content-Type":  "application/json; charset=utf-8",
-		"Cache-Control": "no-cache",
 	}
 
 	rsp := models.EventResponseModel{
@@ -148,7 +213,9 @@ func (m *Moesif) Publish(event *dto.Event) {
 	metadataMap["apiName"] = event.API.APIName
 	metadataMap["apiVersion"] = event.API.APIVersion
 	metadataMap["apiType"] = event.API.APIType
-
+	metadataMap["apiId"] = event.API.APIID
+	metadataMap["projectId"] = event.API.ProjectID
+	
 	// AI Metadata
 	if event.API.APIType == "LlmProvider" {
 		// Safely extract aiMetadata with nil check
@@ -178,7 +245,30 @@ func (m *Moesif) Publish(event *dto.Event) {
 		}
 	}
 
+	// MCP Analytics
+	if event.API.APIType == "Mcp" {
+		if mcpAnalytics, ok := event.Properties["mcpAnalytics"]; ok && mcpAnalytics != nil {
+			metadataMap["mcpAnalytics"] = mcpAnalytics
+		}
+	}
+
+	// Attach request/response payloads to metadata when present in event properties.
+	if requestPayload, ok := event.Properties["request_payload"]; ok && requestPayload != nil {
+		metadataMap["request_payload"] = requestPayload
+	}
+	if responsePayload, ok := event.Properties["response_payload"]; ok && responsePayload != nil {
+		metadataMap["response_payload"] = responsePayload
+	}
+
+	// Determine user ID - use from event properties if available, otherwise anonymous
 	userID := anonymous
+	if userIDVal, ok := event.Properties[userIDPropertyKey]; ok {
+		if uid, ok := userIDVal.(string); ok && uid != "" {
+			userID = uid
+			slog.Debug("Moesif: Using authenticated user ID", "userID", userID)
+		}
+	}
+
 	eventModel := &models.EventModel{
 		Request:  req,
 		Response: rsp,

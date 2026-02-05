@@ -51,6 +51,14 @@ type PolicyExecutionContext struct {
 	// Request ID for correlation
 	requestID string
 
+	// Analytics metadata to be shared across request and response phases
+	// This is for us to share any analyticd related data internally between phases
+	// without currupting the metadata map used by the policies
+	analyticsMetadata map[string]interface{}
+
+	// Dynamic metadata to be shared across request and response phases
+	dynamicMetadata map[string]map[string]interface{}
+
 	// Reference to server components
 	server *ExternalProcessorServer
 }
@@ -62,9 +70,11 @@ func newPolicyExecutionContext(
 	chain *registry.PolicyChain,
 ) *PolicyExecutionContext {
 	return &PolicyExecutionContext{
-		server:      server,
-		routeKey:    routeKey,
-		policyChain: chain,
+		server:            server,
+		routeKey:          routeKey,
+		policyChain:       chain,
+		analyticsMetadata: make(map[string]interface{}),
+		dynamicMetadata:   make(map[string]map[string]interface{}),
 	}
 }
 
@@ -174,6 +184,7 @@ func (ec *PolicyExecutionContext) processRequestHeaders(
 		ec.policyChain.PolicySpecs,
 		ec.requestContext.SharedContext.APIName,
 		ec.routeKey,
+		ec.policyChain.HasExecutionConditions,
 	)
 	if err != nil {
 		return ec.handlePolicyError(ctx, err, "request_headers"), nil
@@ -205,6 +216,7 @@ func (ec *PolicyExecutionContext) processRequestBody(
 			ec.policyChain.PolicySpecs,
 			ec.requestContext.SharedContext.APIName,
 			ec.routeKey,
+			ec.policyChain.HasExecutionConditions,
 		)
 		if err != nil {
 			return ec.handlePolicyError(ctx, err, "request_body"), nil
@@ -248,6 +260,7 @@ func (ec *PolicyExecutionContext) processResponseHeaders(
 		ec.policyChain.PolicySpecs,
 		ec.responseContext.SharedContext.APIName,
 		ec.routeKey,
+		ec.policyChain.HasExecutionConditions,
 	)
 	if err != nil {
 		return ec.handlePolicyError(ctx, err, "response_headers"), nil
@@ -279,6 +292,7 @@ func (ec *PolicyExecutionContext) processResponseBody(
 			ec.policyChain.PolicySpecs,
 			ec.responseContext.SharedContext.APIName,
 			ec.routeKey,
+			ec.policyChain.HasExecutionConditions,
 		)
 		if err != nil {
 			return ec.handlePolicyError(ctx, err, "response_body"), nil
@@ -337,6 +351,7 @@ func (ec *PolicyExecutionContext) buildRequestContext(headers *extprocv3.HttpHea
 	// Create shared context that will persist across request/response phases
 	sharedCtx := &policy.SharedContext{
 		RequestID:     requestID,
+		ProjectID:     routeMetadata.ProjectID,
 		APIId:         routeMetadata.APIId,
 		APIName:       routeMetadata.APIName,
 		APIVersion:    routeMetadata.APIVersion,
@@ -344,6 +359,15 @@ func (ec *PolicyExecutionContext) buildRequestContext(headers *extprocv3.HttpHea
 		APIContext:    routeMetadata.Context,
 		OperationPath: routeMetadata.OperationPath,
 		Metadata:      make(map[string]interface{}),
+		AuthContext:   make(map[string]string),
+	}
+	// Add template handle to metadata for LLM provider/proxy scenarios
+	if routeMetadata.TemplateHandle != "" {
+		sharedCtx.Metadata["template_handle"] = routeMetadata.TemplateHandle
+	}
+	// Add provider name to metadata for LLM provider/proxy scenarios
+	if routeMetadata.ProviderName != "" {
+		sharedCtx.Metadata["provider_name"] = routeMetadata.ProviderName
 	}
 
 	// Build context with Headers wrapper and pseudo-headers

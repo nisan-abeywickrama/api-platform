@@ -18,6 +18,7 @@
 package analytics
 
 import (
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strconv"
@@ -29,6 +30,9 @@ import (
 	"github.com/wso2/api-platform/gateway/policy-engine/internal/config"
 	"github.com/wso2/api-platform/gateway/policy-engine/internal/constants"
 )
+
+const lazyResourceTypeLLMProviderTemplate = "LlmProviderTemplate"
+const lazyResourceTypeProviderTemplateMapping = "ProviderTemplateMapping"
 
 // EventCategory represents the category of an event.
 type EventCategory string
@@ -54,8 +58,10 @@ const (
 	DefaultAnalyticsPublisher = "default"
 	// MoesifAnalyticsPublisher represents the Moesif analytics publisher.
 	MoesifAnalyticsPublisher = "moesif"
-	// ELKAnalyticsPublisher represents the ELK analytics publisher.
-	ELKAnalyticsPublisher = "elk"
+
+	// HeaderKeys represents the header keys.
+	RequestHeadersKey  = "request_headers"
+	ResponseHeadersKey = "response_headers"
 
 	// PromptTokenCountMetadataKey represents the prompt token count metadata key.
 	PromptTokenCountMetadataKey string = "aitoken:prompttokencount"
@@ -70,9 +76,12 @@ const (
 	AIProviderNameMetadataKey string = "ai:providername"
 	// AIProviderAPIVersionMetadataKey represents the AI provider API version metadata key.
 	AIProviderAPIVersionMetadataKey string = "ai:providerversion"
+
+	// UserIDMetadataKey represents the user ID metadata key for analytics.
+	UserIDMetadataKey string = "x-wso2-user-id"
 )
 
-// Analytics represents Choreo analytics.
+// Analytics represents analytics collector service.
 type Analytics struct {
 	// cfg represents the server configuration.
 	cfg *config.Config
@@ -183,6 +192,7 @@ func (c *Analytics) prepareAnalyticEvent(logEntry *v3.HTTPAccessLogEntry) *dto.E
 	extendedAPI.OrganizationID = keyValuePairsFromMetadata[APIOrganizationIDKey]
 	extendedAPI.APIContext = keyValuePairsFromMetadata[APIContextKey]
 	extendedAPI.EnvironmentID = keyValuePairsFromMetadata[APIEnvironmentKey]
+	extendedAPI.ProjectID = keyValuePairsFromMetadata[ProjectIDKey]
 
 	request := logEntry.GetRequest()
 	response := logEntry.GetResponse()
@@ -271,6 +281,12 @@ func (c *Analytics) prepareAnalyticEvent(logEntry *v3.HTTPAccessLogEntry) *dto.E
 	event.RequestTimestamp = logEntry.GetCommonProperties().GetStartTime().AsTime()
 	event.Properties = make(map[string]interface{}, 0)
 
+	// Set user ID from metadata if available (for analytics/Moesif integration)
+	if userID, exists := keyValuePairsFromMetadata[UserIDMetadataKey]; exists && userID != "" {
+		event.Properties[UserIDMetadataKey] = userID
+		slog.Debug("Analytics: User ID set from metadata", "userID", userID)
+	}
+
 	// Process AI related metadata only if all the required metadata are present
 	if keyValuePairsFromMetadata[AIProviderNameMetadataKey] != "" ||
 		keyValuePairsFromMetadata[AIProviderAPIVersionMetadataKey] != "" ||
@@ -324,6 +340,56 @@ func (c *Analytics) prepareAnalyticEvent(logEntry *v3.HTTPAccessLogEntry) *dto.E
 		event.Properties["responseSize"] = logEntry.Response.ResponseBodyBytes
 	} else {
 		event.Properties["responseContentType"] = Unknown
+	}
+
+	//Adding request and response headers for the analytics event
+	if requestHeaders, exists := keyValuePairsFromMetadata[RequestHeadersKey]; exists {
+		event.Properties["requestHeaders"] = requestHeaders
+	}
+	if responseHeaders, exists := keyValuePairsFromMetadata[ResponseHeadersKey]; exists {
+		event.Properties["responseHeaders"] = responseHeaders
+	}
+
+	// Optionally attach request and response payloads when enabled via configuration.
+	if c.cfg.Analytics.AllowPayloads {
+		if requestPayload, ok := keyValuePairsFromMetadata["request_payload"]; ok && requestPayload != "" {
+			event.Properties["request_payload"] = requestPayload
+			slog.Debug("Analytics request payload captured", "size_bytes", len(requestPayload))
+		}
+		if responsePayload, ok := keyValuePairsFromMetadata["response_payload"]; ok && responsePayload != "" {
+			event.Properties["response_payload"] = responsePayload
+			slog.Debug("Analytics response payload captured", "size_bytes", len(responsePayload))
+		}
+	}
+	
+	if keyValuePairsFromMetadata[APITypeKey] != "" && keyValuePairsFromMetadata[APITypeKey] == "Mcp" {
+		mcpAnalytics := make(map[string]interface{})
+		if mcpSessionID, ok := keyValuePairsFromMetadata["mcp_session_id"]; ok && mcpSessionID != "" {
+			mcpAnalytics["mcp_session_id"] = mcpSessionID
+		}
+		if mcpRequestProps, ok := keyValuePairsFromMetadata["mcp_request_properties"]; ok && mcpRequestProps != "" {
+			// Parse the JSON string into a map
+			var propsMap map[string]interface{}
+			if err := json.Unmarshal([]byte(mcpRequestProps), &propsMap); err == nil {
+				mcpAnalytics["mcp_analytics"] = propsMap
+			} else {
+				slog.Debug("Failed to unmarshal MCP request properties", "error", err)
+				// Fallback to raw string if parsing fails
+				mcpAnalytics["mcp_analytics"] = mcpRequestProps
+			}
+		}
+		if mcpServerInfo, ok := keyValuePairsFromMetadata["mcp_server_info"]; ok && mcpServerInfo != "" {
+			// Parse the JSON string into a map
+			var serverInfoMap map[string]interface{}
+			if err := json.Unmarshal([]byte(mcpServerInfo), &serverInfoMap); err == nil {
+				mcpAnalytics["mcp_server_info"] = serverInfoMap
+			} else {
+				slog.Debug("Failed to unmarshal MCP server info", "error", err)
+				// Fallback to raw string if parsing fails
+				mcpAnalytics["mcp_server_info"] = mcpServerInfo
+			}
+		}
+		event.Properties["mcpAnalytics"] = mcpAnalytics
 	}
 
 	return event

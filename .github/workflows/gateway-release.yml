@@ -2,11 +2,6 @@ name: Gateway Release
 
 on:
   workflow_dispatch:
-    inputs:
-      version:
-        description: 'Version to release (e.g., 0.1.0)'
-        required: true
-        type: string
 
 env:
   DOCKER_REGISTRY: ghcr.io/wso2/api-platform
@@ -18,11 +13,17 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Determine version from VERSION file
+        id: version
+        run: |
+          VERSION=$(make -C gateway version-get-release --no-print-directory)
+          echo "Releasing gateway version: ${VERSION}"
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+
       - name: Set version
         run: |
-          VERSION=${{ inputs.version }}
-          make version-set COMPONENT=gateway VERSION_ARG=${VERSION}
-          make update-images COMPONENT=gateway VERSION_ARG=${VERSION}
+          VERSION=${{ steps.version.outputs.version }}
+          make -C gateway version-set VERSION=${VERSION}
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -58,14 +59,38 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git commit -am "Release gateway version ${{ inputs.version }}"
-          git tag -a gateway-v${{ inputs.version }} -m "Gateway ${{ inputs.version }}"
-          git push origin gateway-v${{ inputs.version }}
+          if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+            git commit -am "Release gateway version ${{ steps.version.outputs.version }}"
+          fi
+          git tag -a gateway/v${{ steps.version.outputs.version }} -m "Gateway ${{ steps.version.outputs.version }}"
+          git push origin gateway/v${{ steps.version.outputs.version }}
 
 
-      - name: Set to next dev version
+      - name: Bump to next dev version
+        run: make -C gateway version-bump-next-dev
+
+      - name: Commit version bump
         run: |
-          make version-bump-next-dev COMPONENT=gateway
-          make update-images COMPONENT=gateway VERSION_ARG=$(cat gateway/VERSION)
-          git commit -am "Bump gateway to next dev version"
-          git push origin main
+          if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+            git commit -am "Bump gateway to next dev version"
+          else
+            echo "No changes to commit"
+          fi
+
+      - name: Create PR for version bump
+        id: create-pr
+        uses: peter-evans/create-pull-request@v6
+        with:
+          commit-message: "Bump gateway to next dev version"
+          title: "chore: Bump gateway to next dev version"
+          body: |
+            Automated version bump after release `gateway/v${{ steps.version.outputs.version }}`
+
+            This PR bumps the gateway version to the next development version.
+          branch: version-bump-${{ github.run_id }}
+          base: main
+          delete-branch: true
+          assignees: renuka-fernando
+          labels: |
+            automated
+            version-bump

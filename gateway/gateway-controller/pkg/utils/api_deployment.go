@@ -21,6 +21,7 @@ package utils
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -34,16 +35,15 @@ import (
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/models"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/storage"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/xds"
-	"go.uber.org/zap"
 )
 
 // APIDeploymentParams contains parameters for API deployment operations
 type APIDeploymentParams struct {
-	Data          []byte      // Raw configuration data (YAML/JSON)
-	ContentType   string      // Content type for parsing
-	APIID         string      // API ID (if provided, used for updates; if empty, generates new UUID)
-	CorrelationID string      // Correlation ID for tracking
-	Logger        *zap.Logger // Logger instance
+	Data          []byte       // Raw configuration data (YAML/JSON)
+	ContentType   string       // Content type for parsing
+	APIID         string       // API ID (if provided, used for updates; if empty, generates new UUID)
+	CorrelationID string       // Correlation ID for tracking
+	Logger        *slog.Logger // Logger instance
 }
 
 // APIDeploymentResult contains the result of API deployment
@@ -97,18 +97,17 @@ func (s *APIDeploymentService) DeployAPIConfiguration(params APIDeploymentParams
 	switch apiConfig.Kind {
 	case api.RestApi:
 		apiData, err := apiConfig.Spec.AsAPIConfigData()
-		fmt.Println("APIData: ", apiData)
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse REST API data: %w", err)
 		}
 		apiName = apiData.DisplayName
 		apiVersion = apiData.Version
-	case api.Asyncwebsub:
+	case api.WebSubApi:
 		webhookData, err := apiConfig.Spec.AsWebhookAPIData()
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse WebSub API data: %w", err)
 		}
-		apiName = webhookData.Name
+		apiName = webhookData.DisplayName
 		apiVersion = webhookData.Version
 	}
 
@@ -116,15 +115,15 @@ func (s *APIDeploymentService) DeployAPIConfiguration(params APIDeploymentParams
 	validationErrors := s.validator.Validate(&apiConfig)
 	if len(validationErrors) > 0 {
 		params.Logger.Warn("Configuration validation failed",
-			zap.String("api_id", params.APIID),
-			zap.String("name", apiName),
-			zap.Int("num_errors", len(validationErrors)))
+			slog.String("api_id", params.APIID),
+			slog.String("name", apiName),
+			slog.Int("num_errors", len(validationErrors)))
 
 		for _, e := range validationErrors {
 			fmt.Println(e.Message)
 			params.Logger.Warn("Validation error",
-				zap.String("field", e.Field),
-				zap.String("message", e.Message))
+				slog.String("field", e.Field),
+				slog.String("message", e.Message))
 		}
 		return nil, fmt.Errorf("configuration validation failed with %d errors", len(validationErrors))
 	}
@@ -164,7 +163,7 @@ func (s *APIDeploymentService) DeployAPIConfiguration(params APIDeploymentParams
 		DeployedVersion:     0,
 	}
 
-	if apiConfig.Kind == api.Asyncwebsub {
+	if apiConfig.Kind == api.WebSubApi {
 		topicsToRegister, topicsToUnregister := s.GetTopicsForUpdate(*storedCfg)
 		// TODO: Pre configure the dynamic forward proxy rules for event gw
 		// This was communication bridge will be created on the gw startup
@@ -178,23 +177,26 @@ func (s *APIDeploymentService) DeployAPIConfiguration(params APIDeploymentParams
 			wg2.Add(1)
 			go func(list []string) {
 				defer wg2.Done()
-				params.Logger.Info("Starting topic registration", zap.Int("total_topics", len(list)), zap.String("api_id", apiID))
+				params.Logger.Info("Starting topic registration", slog.Int("total_topics", len(list)), slog.String("api_id", apiID))
 				var childWg sync.WaitGroup
 				for _, topic := range list {
 					childWg.Add(1)
 					go func(topic string) {
 						defer childWg.Done()
-						if err := s.RegisterTopicWithHub(s.httpClient, topic, "localhost", 8083, params.Logger); err != nil {
+						ctx, cancel := context.WithTimeout(context.Background(), time.Duration(s.routerConfig.EventGateway.TimeoutSeconds)*time.Second)
+						defer cancel()
+
+						if err := s.RegisterTopicWithHub(ctx, s.httpClient, topic, s.routerConfig.EventGateway.RouterHost, s.routerConfig.EventGateway.WebSubHubListenerPort, params.Logger); err != nil {
 							params.Logger.Error("Failed to register topic with WebSubHub",
-								zap.Error(err),
-								zap.String("topic", topic),
-								zap.String("api_id", apiID))
+								slog.Any("error", err),
+								slog.String("topic", topic),
+								slog.String("api_id", apiID))
 							atomic.AddInt32(&regErrs, 1)
 							return
 						} else {
 							params.Logger.Info("Successfully registered topic with WebSubHub",
-								zap.String("topic", topic),
-								zap.String("api_id", apiID))
+								slog.String("topic", topic),
+								slog.String("api_id", apiID))
 						}
 					}(topic)
 				}
@@ -207,22 +209,25 @@ func (s *APIDeploymentService) DeployAPIConfiguration(params APIDeploymentParams
 			go func(list []string) {
 				defer wg2.Done()
 				var childWg sync.WaitGroup
-				params.Logger.Info("Starting topic deregistration", zap.Int("total_topics", len(list)), zap.String("api_id", apiID))
+				params.Logger.Info("Starting topic deregistration", slog.Int("total_topics", len(list)), slog.String("api_id", apiID))
 				for _, topic := range list {
 					childWg.Add(1)
 					go func(topic string) {
 						defer childWg.Done()
-						if err := s.UnregisterTopicWithHub(s.httpClient, topic, "localhost", 8083, params.Logger); err != nil {
+						ctx, cancel := context.WithTimeout(context.Background(), time.Duration(s.routerConfig.EventGateway.TimeoutSeconds)*time.Second)
+						defer cancel()
+
+						if err := s.UnregisterTopicWithHub(ctx, s.httpClient, topic, s.routerConfig.EventGateway.RouterHost, s.routerConfig.EventGateway.WebSubHubListenerPort, params.Logger); err != nil {
 							params.Logger.Error("Failed to deregister topic from WebSubHub",
-								zap.Error(err),
-								zap.String("topic", topic),
-								zap.String("api_id", apiID))
+								slog.Any("error", err),
+								slog.String("topic", topic),
+								slog.String("api_id", apiID))
 							atomic.AddInt32(&deregErrs, 1)
 							return
 						} else {
 							params.Logger.Info("Successfully deregistered topic from WebSubHub",
-								zap.String("topic", topic),
-								zap.String("api_id", apiID))
+								slog.String("topic", topic),
+								slog.String("api_id", apiID))
 						}
 					}(topic)
 				}
@@ -232,17 +237,17 @@ func (s *APIDeploymentService) DeployAPIConfiguration(params APIDeploymentParams
 
 		wg2.Wait()
 		params.Logger.Info("Topic lifecycle operations completed",
-			zap.String("api_id", apiID),
-			zap.Int("registered", len(topicsToRegister)),
-			zap.Int("deregistered", len(topicsToUnregister)),
-			zap.Int("register_errors", int(regErrs)),
-			zap.Int("deregister_errors", int(deregErrs)))
+			slog.String("api_id", apiID),
+			slog.Int("registered", len(topicsToRegister)),
+			slog.Int("deregistered", len(topicsToUnregister)),
+			slog.Int("register_errors", int(regErrs)),
+			slog.Int("deregister_errors", int(deregErrs)))
 
 		// Check if topic operations failed and return error
 		if regErrs > 0 || deregErrs > 0 {
 			params.Logger.Error("Topic lifecycle operations failed",
-				zap.Int("register_errors", int(regErrs)),
-				zap.Int("deregister_errors", int(deregErrs)))
+				slog.Int("register_errors", int(regErrs)),
+				slog.Int("deregister_errors", int(deregErrs)))
 			return nil, fmt.Errorf("failed to complete topic operations: %d registration error(s), %d deregistration error(s)", regErrs, deregErrs)
 		}
 	}
@@ -256,16 +261,16 @@ func (s *APIDeploymentService) DeployAPIConfiguration(params APIDeploymentParams
 	// Log success
 	if isUpdate {
 		params.Logger.Info("API configuration updated",
-			zap.String("api_id", apiID),
-			zap.String("name", apiName),
-			zap.String("version", apiVersion),
-			zap.String("correlation_id", params.CorrelationID))
+			slog.String("api_id", apiID),
+			slog.String("name", apiName),
+			slog.String("version", apiVersion),
+			slog.String("correlation_id", params.CorrelationID))
 	} else {
 		params.Logger.Info("API configuration created",
-			zap.String("api_id", apiID),
-			zap.String("name", apiName),
-			zap.String("version", apiVersion),
-			zap.String("correlation_id", params.CorrelationID))
+			slog.String("api_id", apiID),
+			slog.String("name", apiName),
+			slog.String("version", apiVersion),
+			slog.String("correlation_id", params.CorrelationID))
 	}
 
 	// Update xDS snapshot asynchronously
@@ -275,9 +280,9 @@ func (s *APIDeploymentService) DeployAPIConfiguration(params APIDeploymentParams
 
 		if err := s.snapshotManager.UpdateSnapshot(ctx, params.CorrelationID); err != nil {
 			params.Logger.Error("Failed to update xDS snapshot",
-				zap.Error(err),
-				zap.String("api_id", apiID),
-				zap.String("correlation_id", params.CorrelationID))
+				slog.Any("error", err),
+				slog.String("api_id", apiID),
+				slog.String("correlation_id", params.CorrelationID))
 		}
 	}()
 
@@ -301,12 +306,11 @@ func (s *APIDeploymentService) GetTopicsForUpdate(apiConfig models.StoredConfig)
 
 	for _, topic := range asyncData.Channels {
 		// Remove leading '/' from name, context, version and topic path if present
-		name := strings.TrimPrefix(asyncData.Name, "/")
-		context := strings.TrimPrefix(asyncData.Context, "/")
-		version := strings.TrimPrefix(asyncData.Version, "/")
-		path := strings.TrimPrefix(topic.Path, "/")
-
-		modifiedTopic := fmt.Sprintf("%s_%s_%s_%s", name, context, version, path)
+		contextWithVersion := strings.ReplaceAll(asyncData.Context, "$version", asyncData.Version)
+		contextWithVersion = strings.TrimPrefix(contextWithVersion, "/")
+		contextWithVersion = strings.ReplaceAll(contextWithVersion, "/", "_")
+		name := strings.TrimPrefix(topic.Name, "/")
+		modifiedTopic := fmt.Sprintf("%s_%s", contextWithVersion, name)
 		apiTopicsPerRevision[modifiedTopic] = true
 	}
 
@@ -316,7 +320,7 @@ func (s *APIDeploymentService) GetTopicsForUpdate(apiConfig models.StoredConfig)
 		}
 	}
 
-	for topic, _ := range apiTopicsPerRevision {
+	for topic := range apiTopicsPerRevision {
 		if s.store.TopicManager.IsTopicExist(apiConfig.ID, topic) {
 			continue
 		}
@@ -331,55 +335,48 @@ func (s *APIDeploymentService) GetTopicsForDelete(apiConfig models.StoredConfig)
 }
 
 // saveOrUpdateConfig handles the atomic dual-write operation for saving/updating configuration
-func (s *APIDeploymentService) saveOrUpdateConfig(storedCfg *models.StoredConfig, logger *zap.Logger) (bool, error) {
-	// Try to save to database first (only if persistent mode)
+func (s *APIDeploymentService) saveOrUpdateConfig(storedCfg *models.StoredConfig, logger *slog.Logger) (bool, error) {
+	existing, _ := s.store.Get(storedCfg.ID)
+
+	// If config already exists, update it
+	if existing != nil {
+		logger.Info("API configuration already exists, updating",
+			slog.String("api_id", storedCfg.ID),
+			slog.String("displayName", storedCfg.GetDisplayName()),
+			slog.String("version", storedCfg.GetVersion()))
+		return s.updateExistingConfig(storedCfg, existing, logger)
+	}
+
+	// Save new config to database first (only if persistent mode)
 	if s.db != nil {
 		if err := s.db.SaveConfig(storedCfg); err != nil {
-			// Check if it's a conflict (API already exists)
-			if storage.IsConflictError(err) {
-				logger.Info("API configuration already exists in database, updating instead",
-					zap.String("api_id", storedCfg.ID),
-					zap.String("displayName", storedCfg.GetDisplayName()),
-					zap.String("version", storedCfg.GetVersion()))
-
-				// Try to update instead
-				return s.updateExistingConfig(storedCfg, logger)
-			} else {
-				return false, fmt.Errorf("failed to save config to database: %w", err)
-			}
+			logger.Info("Error saving new API configuration to database",
+				slog.String("api_id", storedCfg.ID),
+				slog.String("displayName", storedCfg.GetDisplayName()),
+				slog.String("version", storedCfg.GetVersion()))
+			return false, fmt.Errorf("failed to save config to database: %w", err)
 		}
 	}
 
-	// Try to add to in-memory store
+	// Add to in-memory store
 	if err := s.store.Add(storedCfg); err != nil {
-		// Check if it's a conflict (API already exists)
-		if storage.IsConflictError(err) {
-			logger.Info("API configuration already exists in memory, updating instead",
-				zap.String("api_id", storedCfg.ID),
-				zap.String("displayName", storedCfg.GetDisplayName()),
-				zap.String("version", storedCfg.GetVersion()))
-
-			// Try to update instead
-			return s.updateExistingConfig(storedCfg, logger)
-		} else {
-			// Rollback database write (only if persistent mode)
-			if s.db != nil {
-				_ = s.db.DeleteConfig(storedCfg.ID)
-			}
-			return false, fmt.Errorf("failed to add config to memory store: %w", err)
+		// Rollback database write (only if persistent mode)
+		if s.db != nil {
+			logger.Info("Error adding new API configuration to memory store, rolling back database",
+				slog.String("api_id", storedCfg.ID),
+				slog.String("displayName", storedCfg.GetDisplayName()),
+				slog.String("version", storedCfg.GetVersion()))
+			_ = s.db.DeleteConfig(storedCfg.ID)
 		}
+		return false, fmt.Errorf("failed to add config to memory store: %w", err)
 	}
 
 	return false, nil // Successfully created new config
 }
 
 // updateExistingConfig updates an existing API configuration
-func (s *APIDeploymentService) updateExistingConfig(newConfig *models.StoredConfig, logger *zap.Logger) (bool, error) {
-	// Get existing config
-	existing, err := s.store.GetByNameVersion(newConfig.GetDisplayName(), newConfig.GetVersion())
-	if err != nil {
-		return false, fmt.Errorf("failed to get existing config: %w", err)
-	}
+func (s *APIDeploymentService) updateExistingConfig(newConfig *models.StoredConfig,
+	existing *models.StoredConfig, logger *slog.Logger) (bool, error) {
 
 	// Backup original state for potential rollback
 	original := *existing
@@ -387,6 +384,7 @@ func (s *APIDeploymentService) updateExistingConfig(newConfig *models.StoredConf
 	// Update the existing configuration
 	now := time.Now()
 	existing.Configuration = newConfig.Configuration
+	existing.SourceConfiguration = newConfig.SourceConfiguration
 	existing.Status = models.StatusPending
 	existing.UpdatedAt = now
 	existing.DeployedAt = nil
@@ -405,10 +403,10 @@ func (s *APIDeploymentService) updateExistingConfig(newConfig *models.StoredConf
 		if s.db != nil {
 			if rbErr := s.db.UpdateConfig(&original); rbErr != nil {
 				logger.Error("Failed to rollback DB after memory update failure",
-					zap.Error(rbErr),
-					zap.String("id", original.ID),
-					zap.String("displayName", original.GetDisplayName()),
-					zap.String("version", original.GetVersion()))
+					slog.Any("error", rbErr),
+					slog.String("id", original.ID),
+					slog.String("displayName", original.GetDisplayName()),
+					slog.String("version", original.GetVersion()))
 			}
 		}
 		return false, fmt.Errorf("failed to update config in memory store: %w", err)
@@ -420,18 +418,17 @@ func (s *APIDeploymentService) updateExistingConfig(newConfig *models.StoredConf
 	return true, nil // Successfully updated existing config
 }
 
-// RegisterTopicWithHub registers a topic with the WebSubHub
-func (s *APIDeploymentService) RegisterTopicWithHub(httpClient *http.Client, topic, webSubHubHost string, webSubPort int, logger *zap.Logger) error {
-	return s.sendTopicRequestToHub(httpClient, topic, "register", webSubHubHost, webSubPort, logger)
+func (s *APIDeploymentService) RegisterTopicWithHub(ctx context.Context, httpClient *http.Client, topic, webSubHubHost string, webSubPort int, logger *slog.Logger) error {
+	return s.sendTopicRequestToHub(ctx, httpClient, topic, "register", webSubHubHost, webSubPort, logger)
 }
 
 // UnregisterTopicWithHub unregisters a topic from the WebSubHub
-func (s *APIDeploymentService) UnregisterTopicWithHub(httpClient *http.Client, topic, webSubHubHost string, webSubPort int, logger *zap.Logger) error {
-	return s.sendTopicRequestToHub(httpClient, topic, "deregister", webSubHubHost, webSubPort, logger)
+func (s *APIDeploymentService) UnregisterTopicWithHub(ctx context.Context, httpClient *http.Client, topic, webSubHubHost string, webSubPort int, logger *slog.Logger) error {
+	return s.sendTopicRequestToHub(ctx, httpClient, topic, "deregister", webSubHubHost, webSubPort, logger)
 }
 
 // sendTopicRequestToHub sends a topic registration/unregistration request to the WebSubHub
-func (s *APIDeploymentService) sendTopicRequestToHub(httpClient *http.Client, topic string, mode string, webSubHubHost string, webSubPort int, logger *zap.Logger) error {
+func (s *APIDeploymentService) sendTopicRequestToHub(ctx context.Context, httpClient *http.Client, topic string, mode string, webSubHubHost string, webSubPort int, logger *slog.Logger) error {
 	// Prepare form data
 	formData := url.Values{}
 	formData.Set("hub.mode", mode)
@@ -447,7 +444,7 @@ func (s *APIDeploymentService) sendTopicRequestToHub(httpClient *http.Client, to
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		// Encode form values so special characters in hub.topic are properly percent-encoded
-		req, err := http.NewRequest("POST", targetURL, strings.NewReader(formData.Encode()))
+		req, err := http.NewRequestWithContext(ctx, "POST", targetURL, strings.NewReader(formData.Encode()))
 		if err != nil {
 			return fmt.Errorf("failed to create HTTP request: %w", err)
 		}
@@ -455,6 +452,12 @@ func (s *APIDeploymentService) sendTopicRequestToHub(httpClient *http.Client, to
 
 		resp, err := httpClient.Do(req)
 		if err != nil {
+			// If the context was cancelled or deadline exceeded, surface that
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("request canceled: %w", ctx.Err())
+			default:
+			}
 			return fmt.Errorf("failed to send HTTP request: %w", err)
 		}
 
@@ -464,11 +467,9 @@ func (s *APIDeploymentService) sendTopicRequestToHub(httpClient *http.Client, to
 
 			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 				logger.Debug("Topic request sent to WebSubHub",
-					zap.String("topic", topic),
-					zap.String("mode", mode),
-					zap.Int("status", resp.StatusCode))
-				err = nil
-				return
+					slog.String("topic", topic),
+					slog.String("mode", mode),
+					slog.Int("status", resp.StatusCode))
 			}
 
 			lastStatus = resp.StatusCode
@@ -481,7 +482,11 @@ func (s *APIDeploymentService) sendTopicRequestToHub(httpClient *http.Client, to
 
 		// Retry only on 404 or 503, up to maxRetries
 		if (lastStatus == http.StatusNotFound || lastStatus == http.StatusServiceUnavailable) && attempt < maxRetries {
-			time.Sleep(backoff)
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("request canceled: %w", ctx.Err())
+			case <-time.After(backoff):
+			}
 			backoff *= 2
 			lastStatus = 0
 			continue

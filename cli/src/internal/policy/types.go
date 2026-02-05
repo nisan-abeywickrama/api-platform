@@ -18,11 +18,25 @@
 
 package policy
 
-// PolicyManifest represents the policy-manifest.yaml structure
+// PolicyManifest represents the build.yaml structure (policy manifest)
 type PolicyManifest struct {
 	Version           string           `yaml:"version"`
 	VersionResolution string           `yaml:"versionResolution,omitempty"`
 	Policies          []ManifestPolicy `yaml:"policies"`
+	Gateway           GatewayConfig    `yaml:"gateway"`
+}
+
+// GatewayConfig represents the gateway configuration in the manifest
+type GatewayConfig struct {
+	Version string        `yaml:"version"`
+	Images  GatewayImages `yaml:"images,omitempty"`
+}
+
+// GatewayImages represents optional custom image paths in the manifest
+type GatewayImages struct {
+	Builder    string `yaml:"builder,omitempty"`
+	Controller string `yaml:"controller,omitempty"`
+	Router     string `yaml:"router,omitempty"`
 }
 
 // ManifestPolicy represents a policy entry in the manifest
@@ -67,8 +81,6 @@ type LockPolicy struct {
 // ProcessedPolicy represents a policy after processing (downloading, verifying, etc.)
 type ProcessedPolicy struct {
 	Name      string
-	Version   string
-	Checksum  string
 	Source    string // "hub" or "local"
 	LocalPath string // Path to the policy (zip or directory)
 	IsLocal   bool

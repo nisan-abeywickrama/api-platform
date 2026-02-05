@@ -1,12 +1,15 @@
 go 1.25.1
 
 use (
+	./cli/it
 	./cli/src
 	./common
 	./gateway/gateway-builder
 	./gateway/gateway-controller
 	./gateway/it
 	./gateway/policy-engine
+	./gateway/sample-policies/count-letters
+	./gateway/sample-policies/uppercase-body
 	./platform-api/src
 	./sdk
 )

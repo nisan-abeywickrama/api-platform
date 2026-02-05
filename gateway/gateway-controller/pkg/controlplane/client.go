@@ -23,11 +23,14 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	api "github.com/wso2/api-platform/gateway/gateway-controller/pkg/api/generated"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/models"
 
 	"github.com/gorilla/websocket"
@@ -36,7 +39,6 @@ import (
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/storage"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/utils"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/xds"
-	"go.uber.org/zap"
 )
 
 // State represents the connection state
@@ -91,7 +93,7 @@ type ControlPlaneClient interface {
 // Client manages the WebSocket connection to the control plane
 type Client struct {
 	config            config.ControlPlaneConfig
-	logger            *zap.Logger
+	logger            *slog.Logger
 	state             *ConnectionState
 	ctx               context.Context
 	cancel            context.CancelFunc
@@ -104,18 +106,21 @@ type Client struct {
 	validator         config.Validator
 	deploymentService *utils.APIDeploymentService
 	apiUtilsService   *utils.APIUtilsService
+	apiKeyService     *utils.APIKeyService
 	routerConfig      *config.RouterConfig
 }
 
 // NewClient creates a new control plane client
 func NewClient(
 	cfg config.ControlPlaneConfig,
-	logger *zap.Logger,
+	logger *slog.Logger,
 	store *storage.ConfigStore,
 	db storage.Storage,
 	snapshotManager *xds.SnapshotManager,
 	validator config.Validator,
 	routerConfig *config.RouterConfig,
+	apiKeyXDSManager utils.XDSManager,
+	apiKeyConfig *config.APIKeyConfig,
 ) *Client {
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -128,6 +133,8 @@ func NewClient(
 		parser:            config.NewParser(),
 		validator:         validator,
 		deploymentService: utils.NewAPIDeploymentService(store, db, snapshotManager, validator, routerConfig),
+		apiKeyService:     utils.NewAPIKeyService(store, db, apiKeyXDSManager, apiKeyConfig),
+		routerConfig:      routerConfig,
 		state: &ConnectionState{
 			Current:        Disconnected,
 			Conn:           nil,
@@ -161,8 +168,8 @@ func (c *Client) Start() error {
 	}
 
 	c.logger.Info("Starting control plane client",
-		zap.String("host", c.config.Host),
-		zap.String("websocket_url", c.getWebSocketURL()),
+		slog.String("host", c.config.Host),
+		slog.String("websocket_url", c.getWebSocketURL()),
 	)
 
 	// Start connection in background
@@ -202,8 +209,8 @@ func (c *Client) Connect() error {
 	c.setState(Connecting)
 
 	c.logger.Info("Connecting to control plane",
-		zap.String("url", c.getWebSocketURL()),
-		zap.Int("retry_count", c.state.RetryCount),
+		slog.String("url", c.getWebSocketURL()),
+		slog.Int("retry_count", c.state.RetryCount),
 	)
 
 	// Create WebSocket dialer with timeout
@@ -229,20 +236,20 @@ func (c *Client) Connect() error {
 	if err != nil {
 		if resp != nil {
 			c.logger.Error("WebSocket connection failed",
-				zap.Error(err),
-				zap.Int("status_code", resp.StatusCode),
+				slog.Any("error", err),
+				slog.Int("status_code", resp.StatusCode),
 			)
 
 			// Handle authentication failures
 			if resp.StatusCode == http.StatusUnauthorized {
 				c.logger.Error("Authentication failed - invalid or revoked token",
-					zap.String("troubleshooting", "Check GATEWAY_REGISTRATION_TOKEN environment variable"),
+					slog.String("troubleshooting", "Check GATEWAY_REGISTRATION_TOKEN environment variable"),
 				)
 				return fmt.Errorf("authentication failed: %w", err)
 			}
 		} else {
 			c.logger.Error("WebSocket connection failed",
-				zap.Error(err),
+				slog.Any("error", err),
 			)
 		}
 		return err
@@ -278,8 +285,8 @@ func (c *Client) Connect() error {
 	c.state.RetryCount = 0 // Reset retry count on successful connection
 
 	c.logger.Info("Control plane connection established",
-		zap.String("gateway_id", c.state.GatewayID),
-		zap.String("connection_id", c.state.ConnectionID),
+		slog.String("gateway_id", c.state.GatewayID),
+		slog.String("connection_id", c.state.ConnectionID),
 	)
 
 	// Start heartbeat monitor
@@ -316,9 +323,9 @@ func (c *Client) waitForConnectionAck(conn *websocket.Conn) error {
 	c.state.mu.Unlock()
 
 	c.logger.Info("Received connection acknowledgment",
-		zap.String("gateway_id", ack.GatewayID),
-		zap.String("connection_id", ack.ConnectionID),
-		zap.String("timestamp", ack.Timestamp),
+		slog.String("gateway_id", ack.GatewayID),
+		slog.String("connection_id", ack.ConnectionID),
+		slog.String("timestamp", ack.Timestamp),
 	)
 
 	return nil
@@ -336,7 +343,7 @@ func (c *Client) Close() error {
 
 		err := c.state.Conn.Close()
 		c.state.Conn = nil
-		c.setState(Disconnected)
+		c.setStateNoLock(Disconnected)
 
 		return err
 	}
@@ -360,7 +367,7 @@ func (c *Client) heartbeatMonitor() {
 			// Check if heartbeat timeout exceeded (35s = 30s server timeout + 5s grace)
 			if timeSinceLastHeartbeat > 35*time.Second {
 				c.logger.Warn("Heartbeat timeout detected",
-					zap.Duration("time_since_last_heartbeat", timeSinceLastHeartbeat),
+					slog.Duration("time_since_last_heartbeat", timeSinceLastHeartbeat),
 				)
 
 				// Trigger reconnection
@@ -400,9 +407,9 @@ func (c *Client) connectionLoop() {
 		err := c.Connect()
 		if err != nil {
 			c.logger.Warn("Connection failed, will retry",
-				zap.Error(err),
-				zap.Duration("retry_delay", c.state.NextRetryDelay),
-				zap.Int("retry_count", c.state.RetryCount),
+				slog.Any("error", err),
+				slog.Duration("retry_delay", c.state.NextRetryDelay),
+				slog.Int("retry_count", c.state.RetryCount),
 			)
 
 			c.setState(Reconnecting)
@@ -449,7 +456,7 @@ func (c *Client) waitForDisconnection() {
 		messageType, message, err := conn.ReadMessage()
 		if err != nil {
 			c.logger.Warn("Connection lost",
-				zap.Error(err),
+				slog.Any("error", err),
 			)
 
 			c.state.mu.Lock()
@@ -471,14 +478,14 @@ func (c *Client) waitForDisconnection() {
 func (c *Client) handleMessage(messageType int, message []byte) {
 	// Log the message type
 	c.logger.Debug("Received WebSocket message",
-		zap.Int("message_type", messageType),
-		zap.Int("message_length", len(message)),
+		slog.Int("message_type", messageType),
+		slog.Int("message_length", len(message)),
 	)
 
 	// Only process text messages (JSON events)
 	if messageType != websocket.TextMessage {
 		c.logger.Debug("Ignoring non-text message",
-			zap.Int("message_type", messageType),
+			slog.Int("message_type", messageType),
 		)
 		return
 	}
@@ -487,8 +494,8 @@ func (c *Client) handleMessage(messageType int, message []byte) {
 	var event map[string]interface{}
 	if err := json.Unmarshal(message, &event); err != nil {
 		c.logger.Error("Failed to parse WebSocket message",
-			zap.Error(err),
-			zap.String("message", string(message)),
+			slog.Any("error", err),
+			slog.String("message", string(message)),
 		)
 		return
 	}
@@ -497,15 +504,15 @@ func (c *Client) handleMessage(messageType int, message []byte) {
 	eventType, ok := event["type"].(string)
 	if !ok {
 		c.logger.Warn("Message missing 'type' field",
-			zap.String("message", string(message)),
+			slog.String("message", string(message)),
 		)
 		return
 	}
 
 	// Log the event to console
 	c.logger.Info("Received WebSocket event",
-		zap.String("type", eventType),
-		zap.String("payload", string(message)),
+		slog.String("type", eventType),
+		slog.String("payload", string(message)),
 	)
 
 	// Handle specific event types
@@ -517,9 +524,15 @@ func (c *Client) handleMessage(messageType int, message []byte) {
 		c.handleAPIDeployedEvent(event)
 	case "api.undeployed":
 		c.handleAPIUndeployedEvent(event)
+	case "apikey.created":
+		c.handleAPIKeyCreatedEvent(event)
+	case "apikey.updated":
+		c.handleAPIKeyUpdatedEvent(event)
+	case "apikey.revoked":
+		c.handleAPIKeyRevokedEvent(event)
 	default:
 		c.logger.Info("Received unknown event type (will be processed when handlers are implemented)",
-			zap.String("type", eventType),
+			slog.String("type", eventType),
 		)
 	}
 }
@@ -527,16 +540,16 @@ func (c *Client) handleMessage(messageType int, message []byte) {
 // handleAPIDeployedEvent handles API deployment events
 func (c *Client) handleAPIDeployedEvent(event map[string]interface{}) {
 	c.logger.Info("API Deployment Event",
-		zap.Any("payload", event["payload"]),
-		zap.Any("timestamp", event["timestamp"]),
-		zap.Any("correlationId", event["correlationId"]),
+		slog.Any("payload", event["payload"]),
+		slog.Any("timestamp", event["timestamp"]),
+		slog.Any("correlationId", event["correlationId"]),
 	)
 
 	// Parse the event into structured format
 	eventBytes, err := json.Marshal(event)
 	if err != nil {
 		c.logger.Error("Failed to marshal event for parsing",
-			zap.Error(err),
+			slog.Any("error", err),
 		)
 		return
 	}
@@ -544,7 +557,7 @@ func (c *Client) handleAPIDeployedEvent(event map[string]interface{}) {
 	var deployedEvent APIDeployedEvent
 	if err := json.Unmarshal(eventBytes, &deployedEvent); err != nil {
 		c.logger.Error("Failed to parse API deployment event",
-			zap.Error(err),
+			slog.Any("error", err),
 		)
 		return
 	}
@@ -557,19 +570,19 @@ func (c *Client) handleAPIDeployedEvent(event map[string]interface{}) {
 	}
 
 	c.logger.Info("Processing API deployment",
-		zap.String("api_id", apiID),
-		zap.String("environment", deployedEvent.Payload.Environment),
-		zap.String("revision_id", deployedEvent.Payload.RevisionID),
-		zap.String("vhost", deployedEvent.Payload.VHost),
-		zap.String("correlation_id", deployedEvent.CorrelationID),
+		slog.String("api_id", apiID),
+		slog.String("environment", deployedEvent.Payload.Environment),
+		slog.String("revision_id", deployedEvent.Payload.RevisionID),
+		slog.String("vhost", deployedEvent.Payload.VHost),
+		slog.String("correlation_id", deployedEvent.CorrelationID),
 	)
 
 	// Fetch API definition from control plane
 	zipData, err := c.apiUtilsService.FetchAPIDefinition(apiID)
 	if err != nil {
 		c.logger.Error("Failed to fetch API definition",
-			zap.String("api_id", apiID),
-			zap.Error(err),
+			slog.String("api_id", apiID),
+			slog.Any("error", err),
 		)
 		return
 	}
@@ -578,39 +591,39 @@ func (c *Client) handleAPIDeployedEvent(event map[string]interface{}) {
 	yamlData, err := c.apiUtilsService.ExtractYAMLFromZip(zipData)
 	if err != nil {
 		c.logger.Error("Failed to extract YAML from zip",
-			zap.String("api_id", apiID),
-			zap.Error(err),
+			slog.String("api_id", apiID),
+			slog.Any("error", err),
 		)
 		return
 	}
 
 	// log the yaml for debugging
 	c.logger.Debug("Extracted YAML data",
-		zap.String("api_id", apiID),
-		zap.String("yaml_data", string(yamlData)),
+		slog.String("api_id", apiID),
+		slog.String("yaml_data", string(yamlData)),
 	)
 
 	// Create API configuration from YAML using the deployment service
 	if err := c.apiUtilsService.CreateAPIFromYAML(yamlData, apiID, deployedEvent.CorrelationID, c.deploymentService); err != nil {
 		c.logger.Error("Failed to create API from YAML",
-			zap.String("api_id", apiID),
-			zap.Error(err),
+			slog.String("api_id", apiID),
+			slog.Any("error", err),
 		)
 		return
 	}
 
 	c.logger.Info("Successfully processed API deployment event",
-		zap.String("api_id", apiID),
-		zap.String("correlation_id", deployedEvent.CorrelationID),
+		slog.String("api_id", apiID),
+		slog.String("correlation_id", deployedEvent.CorrelationID),
 	)
 }
 
 // handleAPIUndeployedEvent handles API undeployment events
 func (c *Client) handleAPIUndeployedEvent(event map[string]interface{}) {
 	c.logger.Info("API Undeployment Event",
-		zap.Any("payload", event["payload"]),
-		zap.Any("timestamp", event["timestamp"]),
-		zap.Any("correlationId", event["correlationId"]),
+		slog.Any("payload", event["payload"]),
+		slog.Any("timestamp", event["timestamp"]),
+		slog.Any("correlationId", event["correlationId"]),
 	)
 
 	// Parse the event into structured format
@@ -780,6 +793,365 @@ func (c *Client) handleAPIUndeployedEvent(event map[string]interface{}) {
 	)
 }
 
+// handleAPIKeyCreatedEvent handles API key created events from platform-api
+func (c *Client) handleAPIKeyCreatedEvent(event map[string]interface{}) {
+	baseLogger := c.logger
+	if baseLogger == nil {
+		baseLogger = slog.Default()
+	}
+	baseLogger.Info("API Key Created Event received",
+		slog.Any("correlation_id", event["correlationId"]),
+		slog.Any("timestamp", event["timestamp"]),
+	)
+
+	eventBytes, err := json.Marshal(event)
+	if err != nil {
+		baseLogger.Error("Failed to marshal API key created event for parsing",
+			slog.Any("correlation_id", event["correlationId"]),
+			slog.Any("error", err),
+		)
+		return
+	}
+
+	var keyCreatedEvent APIKeyCreatedEvent
+	if err := json.Unmarshal(eventBytes, &keyCreatedEvent); err != nil {
+		baseLogger.Error("Failed to parse API key created event",
+			slog.Any("correlation_id", event["correlationId"]),
+			slog.Any("error", err),
+		)
+		return
+	}
+
+	// Defensive nil/empty checks on required fields before logging or proceeding
+	if keyCreatedEvent.Payload.ApiId == "" {
+		baseLogger.Error("API key created event missing required api_id",
+			slog.Any("correlation_id", event["correlationId"]),
+		)
+		return
+	}
+	if keyCreatedEvent.Payload.ApiKey == "" {
+		baseLogger.Error("API key created event missing required api_key",
+			slog.Any("correlation_id", event["correlationId"]),
+		)
+		return
+	}
+	// Validate Name - required field for external API key events
+	// Since no response is sent back through WebSocket, the caller must know the identifier
+	if keyCreatedEvent.Payload.Name != "" {
+		// Validate the name format
+		if err := utils.ValidateAPIKeyName(keyCreatedEvent.Payload.Name); err != nil {
+			baseLogger.Error("API key created event has invalid name",
+				slog.Any("correlation_id", event["correlationId"]),
+				slog.Any("error", err),
+			)
+			return
+		}
+	}
+
+	// Validate DisplayName - optional field (pointer may be nil)
+	if keyCreatedEvent.Payload.DisplayName != nil && strings.TrimSpace(*keyCreatedEvent.Payload.DisplayName) != "" {
+		// Validate the display name format
+		if err := utils.ValidateDisplayName(*keyCreatedEvent.Payload.DisplayName); err != nil {
+			baseLogger.Error("API key created event has invalid display_name",
+				slog.Any("correlation_id", event["correlationId"]),
+				slog.Any("error", err),
+			)
+			return
+		}
+	}
+
+	logger := baseLogger.With(
+		slog.String("correlation_id", keyCreatedEvent.CorrelationID),
+		slog.String("user_id", keyCreatedEvent.UserId),
+		slog.String("api_id", keyCreatedEvent.Payload.ApiId),
+	)
+
+	payload := keyCreatedEvent.Payload
+
+	var expiresAt *time.Time
+	var duration *int
+	now := time.Now()
+
+
+	apiKeyCreationRequest := api.APIKeyCreationRequest{
+		ApiKey:        &payload.ApiKey,
+		DisplayName:   payload.DisplayName,
+		ExternalRefId: payload.ExternalRefId,
+	}
+	if payload.ExpiresAt != nil {
+		// payload.ExpiresAt is likely a *string (RFC3339). Attempt to parse it to time.Time
+		parsedExpiresAt, err := time.Parse(time.RFC3339, *payload.ExpiresAt)
+		if err != nil {
+			logger.Error("Invalid expires_at format for API key, expected RFC3339",
+				slog.Any("expires_at", *payload.ExpiresAt),
+				slog.Any("error", err),
+			)
+			return
+		}
+		if parsedExpiresAt.Before(now) {
+			logger.Error("API key expiration time must be in the future",
+				slog.String("expires_at", parsedExpiresAt.Format(time.RFC3339)),
+				slog.String("now", now.Format(time.RFC3339)))
+			return
+		}
+		// If expires_at is explicitly provided, use it
+		expiresAt = &parsedExpiresAt
+		apiKeyCreationRequest.ExpiresAt = expiresAt
+	} else if payload.ExpiresIn != nil {
+		duration = &payload.ExpiresIn.Duration
+		timeDuration := time.Duration(*duration)
+		switch payload.ExpiresIn.Unit {
+		case string(api.APIKeyCreationRequestExpiresInUnitSeconds):
+			timeDuration *= time.Second
+		case string(api.APIKeyCreationRequestExpiresInUnitMinutes):
+			timeDuration *= time.Minute
+		case string(api.APIKeyCreationRequestExpiresInUnitHours):
+			timeDuration *= time.Hour
+		case string(api.APIKeyCreationRequestExpiresInUnitDays):
+			timeDuration *= 24 * time.Hour
+		case string(api.APIKeyCreationRequestExpiresInUnitWeeks):
+			timeDuration *= 7 * 24 * time.Hour
+		case string(api.APIKeyCreationRequestExpiresInUnitMonths):
+			timeDuration *= 30 * 24 * time.Hour // Approximate month as 30 days
+		default:
+			logger.Error("Unsupported expiration unit", slog.Any("expires_in.unit", payload.ExpiresIn.Unit))
+			return
+		}
+		expiry := now.Add(timeDuration)
+		expiresAt = &expiry
+		apiKeyCreationRequest.ExpiresAt = expiresAt
+	}
+
+	result, err := c.apiKeyService.CreateExternalAPIKeyFromEvent(
+		payload.ApiId,
+		keyCreatedEvent.UserId,
+		&apiKeyCreationRequest,
+		keyCreatedEvent.CorrelationID,
+		logger,
+	)
+	if err != nil {
+		logger.Error("Failed to create external API key", slog.Any("error", err))
+		return
+	}
+
+	logger.Info("Successfully processed API key created event",
+		slog.String("api_key_name", result.Response.ApiKey.Name),
+	)
+}
+
+// handleAPIKeyRevokedEvent handles API key revoked events from platform-api
+func (c *Client) handleAPIKeyRevokedEvent(event map[string]interface{}) {
+	baseLogger := c.logger
+	if baseLogger == nil {
+		baseLogger = slog.Default()
+	}
+	baseLogger.Info("API Key Revoked Event received",
+		slog.Any("correlation_id", event["correlationId"]),
+		slog.Any("timestamp", event["timestamp"]),
+	)
+
+	eventBytes, err := json.Marshal(event)
+	if err != nil {
+		baseLogger.Error("Failed to marshal API key revoked event for parsing",
+			slog.Any("correlation_id", event["correlationId"]),
+			slog.Any("error", err),
+		)
+		return
+	}
+
+	var evt APIKeyRevokedEvent
+	if err := json.Unmarshal(eventBytes, &evt); err != nil {
+		baseLogger.Error("Failed to parse API key revoked event",
+			slog.Any("correlation_id", event["correlationId"]),
+			slog.Any("error", err),
+		)
+		return
+	}
+
+	// Defensive nil/empty checks on required fields before logging or proceeding
+	if evt.Payload.ApiId == "" {
+		baseLogger.Error("API key revoked event missing required api_id",
+			slog.Any("correlation_id", event["correlationId"]),
+		)
+		return
+	}
+	if evt.Payload.KeyName == "" {
+		baseLogger.Error("API key revoked event missing required key_name",
+			slog.Any("correlation_id", event["correlationId"]),
+		)
+		return
+	}
+
+	logger := baseLogger.With(
+		slog.String("correlation_id", evt.CorrelationID),
+		slog.String("user_id", evt.UserId),
+		slog.String("api_id", evt.Payload.ApiId),
+		slog.String("api_key_name", evt.Payload.KeyName),
+	)
+
+	payload := evt.Payload
+
+	err = c.apiKeyService.RevokeExternalAPIKeyFromEvent(
+		payload.ApiId,
+		payload.KeyName,
+		evt.UserId,
+		evt.CorrelationID,
+		logger,
+	)
+	if err != nil {
+		logger.Error("Failed to revoke external API key", slog.Any("error", err))
+		return
+	}
+
+	logger.Info("Successfully processed API key revoked event")
+}
+
+// handleAPIKeyUpdatedEvent handles API key updated events from platform-api.
+func (c *Client) handleAPIKeyUpdatedEvent(event map[string]interface{}) {
+	baseLogger := c.logger
+	if baseLogger == nil {
+		baseLogger = slog.Default()
+	}
+	baseLogger.Info("API Key Updated Event received",
+		slog.Any("correlation_id", event["correlationId"]),
+		slog.Any("timestamp", event["timestamp"]),
+	)
+	eventBytes, err := json.Marshal(event)
+	if err != nil {
+		baseLogger.Error("Failed to marshal event for parsing",
+			slog.Any("correlation_id", event["correlationId"]),
+			slog.Any("error", err),
+		)
+		return
+	}
+
+	var evt APIKeyUpdatedEvent
+	if err := json.Unmarshal(eventBytes, &evt); err != nil {
+		baseLogger.Error("Failed to parse API key updated event",
+			slog.Any("correlation_id", event["correlationId"]),
+			slog.Any("error", err),
+		)
+		return
+	}
+
+	payload := evt.Payload
+
+	// Defensive nil/empty checks on required fields
+	if payload.ApiId == "" {
+		baseLogger.Error("API key updated event missing required api_id",
+			slog.Any("correlation_id", event["correlationId"]),
+		)
+		return
+	}
+	if payload.KeyName == "" {
+		baseLogger.Error("API key updated event missing required key_name",
+			slog.Any("correlation_id", event["correlationId"]),
+		)
+		return
+	}
+	if payload.ApiKey == "" {
+		baseLogger.Error("API key updated event missing required api_key",
+			slog.Any("correlation_id", event["correlationId"]),
+			slog.String("api_id", payload.ApiId),
+			slog.String("key_name", payload.KeyName),
+		)
+		return
+	}
+	if payload.DisplayName == "" {
+		baseLogger.Error("API key updated event missing required display_name",
+			slog.Any("correlation_id", event["correlationId"]),
+			slog.String("api_id", payload.ApiId),
+			slog.String("key_name", payload.KeyName),
+		)
+		return
+	}
+
+	// Validate the display name format
+	if err := utils.ValidateDisplayName(payload.DisplayName); err != nil {
+		baseLogger.Error("API key updated event has invalid display_name",
+			slog.Any("correlation_id", event["correlationId"]),
+			slog.String("api_id", payload.ApiId),
+			slog.String("key_name", payload.KeyName),
+			slog.Any("error", err),
+		)
+		return
+	}
+
+	logger := baseLogger.With(
+		slog.String("correlation_id", evt.CorrelationID),
+		slog.String("user_id", evt.UserId),
+		slog.String("api_id", payload.ApiId),
+		slog.String("key_name", payload.KeyName),
+	)
+
+	var expiresAt *time.Time
+	var duration *int
+	now := time.Now()
+
+	apiKeyCreationRequest := api.APIKeyCreationRequest{
+		ApiKey:        &payload.ApiKey,
+		DisplayName:   &payload.DisplayName,
+		ExternalRefId: &payload.ExternalRefId,
+	}
+	if payload.ExpiresAt != nil {
+		// payload.ExpiresAt is likely a *string (RFC3339). Attempt to parse it to time.Time
+		parsedExpiresAt, err := time.Parse(time.RFC3339, *payload.ExpiresAt)
+		if err != nil {
+			logger.Error("Invalid expires_at format for API key, expected RFC3339",
+				slog.Any("expires_at", *payload.ExpiresAt),
+				slog.Any("error", err),
+			)
+			return
+		}
+		if parsedExpiresAt.Before(now) {
+			logger.Error("API key expiration time must be in the future",
+				slog.String("expires_at", parsedExpiresAt.Format(time.RFC3339)),
+				slog.String("now", now.Format(time.RFC3339)))
+			return
+		}
+		// If expires_at is explicitly provided, use it
+		expiresAt = &parsedExpiresAt
+		apiKeyCreationRequest.ExpiresAt = expiresAt
+	} else if payload.ExpiresIn != nil {
+		duration = &payload.ExpiresIn.Duration
+		timeDuration := time.Duration(*duration)
+		switch payload.ExpiresIn.Unit {
+		case string(api.APIKeyCreationRequestExpiresInUnitSeconds):
+			timeDuration *= time.Second
+		case string(api.APIKeyCreationRequestExpiresInUnitMinutes):
+			timeDuration *= time.Minute
+		case string(api.APIKeyCreationRequestExpiresInUnitHours):
+			timeDuration *= time.Hour
+		case string(api.APIKeyCreationRequestExpiresInUnitDays):
+			timeDuration *= 24 * time.Hour
+		case string(api.APIKeyCreationRequestExpiresInUnitWeeks):
+			timeDuration *= 7 * 24 * time.Hour
+		case string(api.APIKeyCreationRequestExpiresInUnitMonths):
+			timeDuration *= 30 * 24 * time.Hour // Approximate month as 30 days
+		default:
+			logger.Error("Unsupported expiration unit", slog.Any("expires_in.unit", payload.ExpiresIn.Unit))
+			return
+		}
+		expiry := now.Add(timeDuration)
+		expiresAt = &expiry
+		apiKeyCreationRequest.ExpiresAt = expiresAt
+	}
+
+	err = c.apiKeyService.UpdateExternalAPIKeyFromEvent(
+		payload.ApiId,
+		payload.KeyName,
+		&apiKeyCreationRequest,
+		evt.UserId,
+		evt.CorrelationID,
+		logger,
+	)
+	if err != nil {
+		logger.Error("Failed to update external API key", slog.Any("error", err))
+		return
+	}
+	logger.Info("Successfully processed API key updated event")
+}
+
 // calculateNextRetryDelay calculates the next retry delay with exponential backoff and jitter
 func (c *Client) calculateNextRetryDelay() {
 	// Exponential backoff: initial * 2^retries
@@ -806,14 +1178,20 @@ func (c *Client) calculateNextRetryDelay() {
 // setState updates the connection state
 func (c *Client) setState(newState State) {
 	c.state.mu.Lock()
+	defer c.state.mu.Unlock()
+	c.setStateNoLock(newState)
+}
+
+// setStateNoLock updates the connection state without acquiring the lock
+// This should only be called when the caller already holds c.state.mu.Lock()
+func (c *Client) setStateNoLock(newState State) {
 	oldState := c.state.Current
 	c.state.Current = newState
-	c.state.mu.Unlock()
 
 	if oldState != newState {
 		c.logger.Info("Connection state changed",
-			zap.String("from", oldState.String()),
-			zap.String("to", newState.String()),
+			slog.String("from", oldState.String()),
+			slog.String("to", newState.String()),
 		)
 	}
 }
@@ -849,7 +1227,7 @@ func (c *Client) NotifyAPIDeployment(apiID string, apiConfig *models.StoredConfi
 	// Check if connected to control plane
 	if !c.IsConnected() {
 		c.logger.Debug("Not connected to control plane, skipping API deployment notification",
-			zap.String("api_id", apiID))
+			slog.String("api_id", apiID))
 		return nil
 	}
 

@@ -19,6 +19,7 @@ package repository
 
 import (
 	"platform-api/src/internal/model"
+	"time"
 )
 
 // OrganizationRepository defines the interface for organization data access
@@ -54,8 +55,19 @@ type APIRepository interface {
 	GetDeployedAPIsByGatewayUUID(gatewayUUID, orgUUID string) ([]*model.API, error)
 	UpdateAPI(api *model.API) error
 	DeleteAPI(apiUUID, orgUUID string) error
-	CreateDeployment(deployment *model.APIDeployment) error
-	GetDeploymentsByAPIUUID(apiUUID, orgUUID string) ([]*model.APIDeployment, error)
+
+	// Deployment artifact methods (immutable deployments)
+	CreateDeploymentWithLimitEnforcement(deployment *model.APIDeployment, hardLimit int) error    // Atomic: count, cleanup if needed, create
+	GetDeploymentWithContent(deploymentID, apiUUID, orgUUID string) (*model.APIDeployment, error) // With content (for rollback/base deployment)
+	GetDeploymentWithState(deploymentID, apiUUID, orgUUID string) (*model.APIDeployment, error)   // With status derived (without content - lightweight)
+	GetDeploymentsWithState(apiUUID, orgUUID string, gatewayID *string, status *string, maxPerAPIGW int) ([]*model.APIDeployment, error)
+	DeleteDeployment(deploymentID, apiUUID, orgUUID string) error
+	GetCurrentDeploymentByGateway(apiUUID, gatewayID, orgUUID string) (*model.APIDeployment, error)
+
+	// Deployment status methods (mutable state tracking)
+	SetCurrentDeployment(apiUUID, orgUUID, gatewayID, deploymentID string, status model.DeploymentStatus) (updatedAt time.Time, err error)
+	GetDeploymentStatus(apiUUID, orgUUID, gatewayID string) (deploymentID string, status model.DeploymentStatus, updatedAt *time.Time, err error)
+	DeleteDeploymentStatus(apiUUID, orgUUID, gatewayID string) error
 
 	// API-Gateway association methods
 	GetAPIGatewaysWithDetails(apiUUID, orgUUID string) ([]*model.APIGatewayWithDetails, error)

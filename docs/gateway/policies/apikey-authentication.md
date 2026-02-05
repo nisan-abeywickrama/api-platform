@@ -202,7 +202,7 @@ spec:
 
 ## API Key Management
 
-The gateway controller provides REST APIs to manage API keys for APIs that use the API Key Authentication policy. These endpoints allow you to generate, view, rotate, and revoke API keys programmatically.
+The gateway controller provides REST APIs to manage API keys for APIs that use the API Key Authentication policy. These endpoints allow you to generate, inject, update, view, regenerate, and revoke API keys programmatically.
 
 ### Base URL
 
@@ -225,7 +225,7 @@ The gateway controller uses the authentication context of the requesting user to
 #### Basic Authentication Example
 
 ```bash
-curl -X POST "http://localhost:9090/apis/weather-api-v1.0/generate-api-key" \
+curl -X POST "http://localhost:9090/apis/weather-api-v1.0/api-keys" \
   -H "Content-Type: application/json" \
   -u "username:password" \
   -d '{"name": "production-key"}'
@@ -234,9 +234,9 @@ curl -X POST "http://localhost:9090/apis/weather-api-v1.0/generate-api-key" \
 #### JWT Authentication Example
 
 ```bash
-curl -X POST "http://localhost:9090/apis/weather-api-v1.0/generate-api-key" \
+curl -X POST "http://localhost:9090/apis/weather-api-v1.0/api-keys" \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..." \
+  -H "Authorization: Bearer <JWT_TOKEN>" \
   -d '{"name": "production-key"}'
 ```
 
@@ -244,7 +244,112 @@ curl -X POST "http://localhost:9090/apis/weather-api-v1.0/generate-api-key" \
 
 Generate a new API key for a specific API.
 
-**Endpoint**: `POST /apis/{id}/generate-api-key`
+**Endpoint**: `POST /apis/{id}/api-keys`
+
+#### Request Parameters
+
+| Parameter | Type | Location | Required | Description |
+|-----------|------|----------|----------|-------------|
+| `id` | string | path | Yes | Unique public identifier of the API (e.g., `weather-api-v1.0`) |
+
+#### Request Body
+
+```json
+{
+  "displayName": "weather-api-key",
+  "expiresIn": {
+    "duration": 30,
+    "unit": "days"
+  }
+}
+```
+
+**Request Body Schema:**
+
+| Field                | Type | Required | Description |
+|----------------------|------|----------|-------------|
+| `displayName`               | string | No | Custom name for the API key. If not provided, a default name will be generated |
+| `name`               | string | No | Identifier of the API key. If not provided, a default identifier will be generated |
+| `expiresAt`         | string (ISO 8601) | No | Specific expiration timestamp for the API key. If both `expiresIn` and `expiresAt` are provided, `expiresAt` takes precedence |
+| `expiresIn`         | object | No | Relative expiration time from creation |
+| `expiresIn.duration` | integer | Yes (if expiresIn used) | Duration value |
+| `expiresIn.unit`     | string | Yes (if expiresIn used) | Time unit: `seconds`, `minutes`, `hours`, `days`, `weeks`, `months` |
+
+#### Example Request
+
+**Using Basic Authentication:**
+```bash
+curl -X POST "http://localhost:9090/apis/weather-api-v1.0/api-keys" \
+  -H "Content-Type: application/json" \
+  -u "username:password" \
+  -d '{
+    "displayName": "production-key",
+    "expiresIn": {
+      "duration": 90,
+      "unit": "days"
+    }
+  }'
+```
+
+**Using JWT Authentication:**
+```bash
+curl -X POST "http://localhost:9090/apis/weather-api-v1.0/api-keys" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <JWT_TOKEN>" \
+  -d '{
+    "displayName": "production-key",
+    "expiresIn": {
+      "duration": 90,
+      "unit": "days"
+    }
+  }'
+```
+
+#### Successful Response (201 Created)
+
+```json
+{
+  "status": "success",
+  "message": "API key generated successfully",
+  "remainingApiKeyQuota": 9,
+  "apiKey": {
+    "name": "production-key",
+    "displayName": "production-key",
+    "apiKey": "apip_<64_hex>_<22_chars>",
+    "apiId": "weather-api-v1.0",
+    "operations": "[\"*\"]",
+    "status": "active",
+    "createdAt": "2025-12-22T13:02:24.504957558Z",
+    "createdBy": "john",
+    "expiresAt": "2025-12-23T13:02:24.504957558Z"
+  }
+}
+```
+
+#### Response Schema
+
+| Field | Type | Description                                    |
+|-------|------|------------------------------------------------|
+| `status` | string | Operation status (`success`)                   |
+| `message` | string | Detailed message of the status                 |
+| `remainingApiKeyQuota` | integer | Remaining API key quota for the user |
+| `apiKey.displayName` | string | Name of the generated API key                  |
+| `apiKey.name` | string | Identifier of the generated API key                  |
+| `apiKey.apiId` | string | API identifier                                 |
+| `apiKey.apiKey` | string | The actual API key value (starts with `apip_`) |
+| `apiKey.status` | string | Key status (`active`)                          |
+| `apiKey.createdAt` | string | ISO 8601 timestamp of creation                 |
+| `apiKey.createdBy` | string | User who created the key                       |
+| `apiKey.expiresAt` | string | ISO 8601 expiration timestamp (if set)         |
+| `apiKey.operations` | string | Allowed operations (currently `["*"]` for all) |
+
+### Inject API Key
+
+This operation uses the same endpoint as [Generate API Key](#generate-api-key) (`POST /apis/{id}/api-keys`). The behavior is determined by the presence of the `apiKey` field in the request body: omit `apiKey` to generate a system key, or include `apiKey` to inject an external key. See the request body examples in each section for the differing payloads.
+
+Inject an externally generated API key for a specific API.
+
+**Endpoint**: `POST /apis/{id}/api-keys`
 
 #### Request Parameters
 
@@ -257,10 +362,11 @@ Generate a new API key for a specific API.
 ```json
 {
   "name": "weather-api-key",
-  "expires_in": {
+  "expiresIn": {
     "duration": 30,
     "unit": "days"
-  }
+  },
+  "apiKey": "apip_1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
 }
 ```
 
@@ -268,22 +374,25 @@ Generate a new API key for a specific API.
 
 | Field                | Type | Required | Description |
 |----------------------|------|----------|-------------|
-| `name`               | string | No | Custom name for the API key. If not provided, a default name will be generated |
-| `expires_at`         | string (ISO 8601) | No | Specific expiration timestamp for the API key. If both `expires_in` and `expires_at` are provided, `expires_at` takes precedence |
-| `expires_in`         | object | No | Relative expiration time from creation |
-| `expires_in.duration` | integer | Yes (if expiresIn used) | Duration value |
-| `expires_in.unit`     | string | Yes (if expiresIn used) | Time unit: `seconds`, `minutes`, `hours`, `days`, `weeks`, `months` |
+| `displayName`               | string | No | Custom name for the API key. If not provided, a default name will be generated |
+| `name`               | string | No | Identifier of the API key. If not provided, a default identifier will be generated |
+| `apiKey`               | string | No | The API key value to inject. Injected keys can be externally generated and are not required to use the platform `apip_` prefix; platform-generated keys do use the `apip_` prefix. See [Update API Key](#update-api-key) for the same `apiKey` semantics when updating. |
+| `expiresAt`         | string (ISO 8601) | No | Specific expiration timestamp for the API key. If both `expiresIn` and `expiresAt` are provided, `expiresAt` takes precedence |
+| `expiresIn`         | object | No | Relative expiration time from creation |
+| `expiresIn.duration` | integer | Yes (if expiresIn used) | Duration value |
+| `expiresIn.unit`     | string | Yes (if expiresIn used) | Time unit: `seconds`, `minutes`, `hours`, `days`, `weeks`, `months` |
 
 #### Example Request
 
 **Using Basic Authentication:**
 ```bash
-curl -X POST "http://localhost:9090/apis/weather-api-v1.0/generate-api-key" \
+curl -X POST "http://localhost:9090/apis/weather-api-v1.0/api-keys" \
   -H "Content-Type: application/json" \
   -u "username:password" \
   -d '{
-    "name": "production-key",
-    "expires_in": {
+    "displayName": "production-key",
+    "apiKey": "apip_1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+    "expiresIn": {
       "duration": 90,
       "unit": "days"
     }
@@ -292,12 +401,13 @@ curl -X POST "http://localhost:9090/apis/weather-api-v1.0/generate-api-key" \
 
 **Using JWT Authentication:**
 ```bash
-curl -X POST "http://localhost:9090/apis/weather-api-v1.0/generate-api-key" \
+curl -X POST "http://localhost:9090/apis/weather-api-v1.0/api-keys" \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..." \
+  -H "Authorization: Bearer <JWT_TOKEN>" \
   -d '{
-    "name": "production-key",
-    "expires_in": {
+    "displayName": "production-key",
+    "apiKey": "apip_1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+    "expiresIn": {
       "duration": 90,
       "unit": "days"
     }
@@ -308,35 +418,154 @@ curl -X POST "http://localhost:9090/apis/weather-api-v1.0/generate-api-key" \
 
 ```json
 {
-  "api_key": {
-    "apiId": "weather-api-v1.0",
-    "api_key": "apip_3521f31335d98868f1526ef20b5c051a7aa42cdd0dd46747b1456e1264a7e6ad",
-    "created_at": "2025-12-22T13:02:24.504957558Z",
-    "created_by": "john",
-    "expires_at": "2025-12-23T13:02:24.504957558Z",
-    "name": "production-key",
-    "operations": "[\"*\"]",
-    "status": "active"
-  },
+  "status": "success",
   "message": "API key generated successfully",
-  "status": "success"
+  "remainingApiKeyQuota": 9,
+  "apiKey": {
+    "displayName": "production-key",
+    "name": "production-key",
+    "apiId": "weather-api-v1.0",
+    "operations": "[\"*\"]",
+    "status": "active",
+    "createdAt": "2025-12-22T13:02:24.504957558Z",
+    "createdBy": "john",
+    "expiresAt": "2025-12-23T13:02:24.504957558Z"
+  }
 }
 ```
 
 #### Response Schema
 
+
 | Field | Type | Description                                    |
 |-------|------|------------------------------------------------|
 | `status` | string | Operation status (`success`)                   |
 | `message` | string | Detailed message of the status                 |
-| `apiKey.name` | string | Name of the generated API key                  |
+| `remainingApiKeyQuota` | integer | Remaining API key quota for the user |
+| `apiKey.name` | string | Identifier of the generated API key                  |
+| `apiKey.displayName` | string | Display name of the generated API key                  |
 | `apiKey.apiId` | string | API identifier                                 |
-| `apiKey.api_key` | string | The actual API key value (starts with `apip_`) |
+| `apiKey.apiKey` | string | The actual API key value (format may vary) |
 | `apiKey.status` | string | Key status (`active`)                          |
-| `apiKey.created_at` | string | ISO 8601 timestamp of creation                 |
-| `apiKey.created_by` | string | User who created the key                       |
-| `apiKey.expires_at` | string | ISO 8601 expiration timestamp (if set)         |
-| `apiKey.operations` | array | Allowed operations (currently `["*"]` for all) |
+| `apiKey.createdAt` | string | ISO 8601 timestamp of creation                 |
+| `apiKey.createdBy` | string | User who created the key                       |
+| `apiKey.expiresAt` | string | ISO 8601 expiration timestamp (if set)         |
+| `apiKey.operations` | string | Allowed operations (currently `["*"]` for all) |
+
+### Update API Key
+
+Update an existing API key with a new externally provided API key value and optionally update the display name and expiration settings. This endpoint is useful when you need to migrate an existing external API key into the platform or update a key's value while maintaining its identity and metadata.
+
+**Key Differences from Regenerate:**
+- **Update**: Replace the API key with a specific value you provide (for external key migration or synchronization)
+- **Regenerate**: Generate a new random API key value automatically (for security rotation)
+
+**Endpoint**: `PUT /apis/{id}/api-keys/{apiKeyName}`
+
+#### Request Parameters
+
+| Parameter | Type | Location | Required | Description |
+|-----------|------|----------|----------|-------------|
+| `id` | string | path | Yes | Unique public identifier of the API (e.g., `weather-api-v1.0`) |
+| `apiKeyName` | string | path | Yes | Name of the API key to update |
+
+#### Request Body
+
+```json
+{
+  "displayName": "updated-weather-key",
+  "apiKey": "apip_newvalue1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
+  "expiresIn": {
+    "duration": 60,
+    "unit": "days"
+  }
+}
+```
+
+**Request Body Schema:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `displayName` | string | No | Display name for the API key |
+| `apiKey` | string | Yes | The new API key value to set. Must meet minimum length requirements (default: 36 characters) and can be any format (not restricted to platform-generated format) |
+| `expiresAt` | string (ISO 8601) | No | Specific expiration timestamp. If both `expiresAt` and `expiresIn` are provided, `expiresAt` takes precedence. Omitting both `expiresAt` and `expiresIn` clears the key's expiration (no expiry). |
+| `expiresIn` | object | No | Relative expiration time from now. Omitting both `expiresAt` and `expiresIn` removes the API key's expiration (UpdateAPIKey clears expiry when `request.ExpiresAt` and `request.ExpiresIn` are both nil). |
+| `expiresIn.duration` | integer | Yes (if expiresIn used) | Duration value |
+| `expiresIn.unit` | string | Yes (if expiresIn used) | Time unit: `seconds`, `minutes`, `hours`, `days`, `weeks`, `months` |
+
+#### Example Request
+
+**Using Basic Authentication:**
+```bash
+curl -X PUT "http://localhost:9090/apis/weather-api-v1.0/api-keys/production-key" \
+  -H "Content-Type: application/json" \
+  -u "username:password" \
+  -d '{
+    "displayName": "updated-production-key",
+    "apiKey": "apip_abc123def456789abc123def456789abc123def456789abc123def456789abc12",
+    "expiresIn": {
+      "duration": 60,
+      "unit": "days"
+    }
+  }'
+```
+
+**Using JWT Authentication:**
+```bash
+curl -X PUT "http://localhost:9090/apis/weather-api-v1.0/api-keys/production-key" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <JWT_TOKEN>" \
+  -d '{
+    "displayName": "updated-production-key",
+    "apiKey": "apip_abc123def456789abc123def456789abc123def456789abc123def456789abc12",
+    "expiresIn": {
+      "duration": 60,
+      "unit": "days"
+    }
+  }'
+```
+
+#### Successful Response (200 OK)
+
+```json
+{
+  "status": "success",
+  "message": "API key updated successfully",
+  "remainingApiKeyQuota": 9,
+  "apiKey": {
+    "name": "production-key",
+    "displayName": "updated-production-key",
+    "apiKey": "apip_abc123def456789abc123def456789abc123def456789abc123def456789abc12",
+    "apiId": "weather-api-v1.0",
+    "operations": "[\"*\"]",
+    "status": "active",
+    "createdAt": "2025-12-22T12:26:47.626109914Z",
+    "createdBy": "john",
+    "updatedAt": "2025-12-22T14:30:15.123456789Z",
+    "updatedBy": "john",
+    "expiresAt": "2026-02-20T14:30:15.123456789Z"
+  }
+}
+```
+
+#### Response Schema
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `status` | string | Operation status (`success`) |
+| `message` | string | Detailed message of the status |
+| `remainingApiKeyQuota` | integer | Remaining API key quota for the user (unchanged by update) |
+| `apiKey.name` | string | Identifier of the API key (unchanged) |
+| `apiKey.displayName` | string | Updated display name of the API key |
+| `apiKey.apiKey` | string | The new API key value |
+| `apiKey.apiId` | string | API identifier (unchanged) |
+| `apiKey.status` | string | Key status (`active`) |
+| `apiKey.createdAt` | string | Original ISO 8601 timestamp of creation (unchanged) |
+| `apiKey.createdBy` | string | Original user who created the key (unchanged) |
+| `apiKey.updatedAt` | string | ISO 8601 timestamp of the update |
+| `apiKey.updatedBy` | string | User who updated the key |
+| `apiKey.expiresAt` | string | Updated ISO 8601 expiration timestamp (if provided) |
+| `apiKey.operations` | string | Allowed operations (currently `["*"]` for all) |
 
 ### List API Keys
 
@@ -362,35 +591,37 @@ curl -X GET "http://localhost:9090/apis/weather-api-v1.0/api-keys" \
 **Using JWT Authentication:**
 ```bash
 curl -X GET "http://localhost:9090/apis/weather-api-v1.0/api-keys" \
-  -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+  -H "Authorization: Bearer <JWT_TOKEN>"
 ```
 
 #### Successful Response (200 OK)
 
 ```json
 {
+  "status": "success",
+  "totalCount": 2,
   "apiKeys": [
     {
-      "apiId": "weather-api-v1.0",
-      "created_at": "2025-12-22T13:02:24.504957558Z",
-      "created_by": "john",
-      "expires_at": "2025-12-23T13:02:24.504957558Z",
       "name": "test-key",
+      "apiKey": "apip_3521f3*********",
+      "apiId": "weather-api-v1.0",
       "operations": "[\"*\"]",
-      "status": "active"
+      "status": "active",
+      "createdAt": "2025-12-22T13:02:24.504957558Z",
+      "createdBy": "john",
+      "expiresAt": "2025-12-23T13:02:24.504957558Z"
     },
     {
-      "apiId": "weather-api-v1.0",
-      "created_at": "2025-12-22T13:02:24.504957558Z",
-      "created_by": "admin",
-      "expires_at": "2026-03-22T13:02:24.504957558Z",
       "name": "production-key",
+      "apiKey": "apip_18dfd4*********",
+      "apiId": "weather-api-v1.0",
       "operations": "[\"*\"]",
-      "status": "active"
+      "status": "active",
+      "createdAt": "2025-12-22T13:02:24.504957558Z",
+      "createdBy": "admin",
+      "expiresAt": "2026-03-22T13:02:24.504957558Z"
     }
-  ],
-  "status": "success",
-  "totalCount": 2
+  ]
 }
 ```
 
@@ -400,36 +631,36 @@ curl -X GET "http://localhost:9090/apis/weather-api-v1.0/api-keys" \
 |-------|------|-------------|
 | `status` | string | Operation status (`success`) |
 | `totalCount` | integer | Total number of active API keys |
-| `apiKeys` | array | List of API key objects (without the actual key value for security) |
+| `apiKeys` | array | List of API key objects |
 
-**Note**: The actual API key values are not returned in the list response for security reasons.
+**Note**: For security reasons, the actual API key values are masked in the list response, showing only the first 10 characters followed by asterisks. The full API key value is only returned when generating or regenerating a key.
 
-### Rotate API Key
+### Regenerate API Key
 
-Rotate an existing API key, generating a new key value while maintaining the same name and metadata.
+Regenerate an existing API key, generating a new key value while maintaining the same name and metadata.
 Only the user who created the key can perform this operation.
 
 **Endpoint**: `POST /apis/{id}/api-keys/{apiKeyName}/regenerate`
 
 #### Request Parameters
 
-| Parameter | Type | Location | Required | Description |
-|-----------|------|----------|----------|-------------|
+| Parameter | Type | Location | Required | Description                         |
+|-----------|------|----------|----------|-------------------------------------|
 | `id` | string | path | Yes | Unique public identifier of the API |
-| `apiKeyName` | string | path | Yes | Name of the API key to rotate |
+| `apiKeyName` | string | path | Yes | Name of the API key to regenerate   |
 
 #### Request Body
 
 ```json
 {
-  "expires_in": {
+  "expiresIn": {
     "duration": 60,
     "unit": "days"
   }
 }
 ```
 
-**Request Body Schema:** Same as the generate API key request body, but only expiration settings are typically updated during rotation.
+**Request Body Schema:** Same as the generate API key request body, but only expiration settings are typically updated during regeneration.
 
 #### Example Request
 
@@ -439,7 +670,7 @@ curl -X POST "http://localhost:9090/apis/weather-api-v1.0/api-keys/production-ke
   -H "Content-Type: application/json" \
   -u "username:password" \
   -d '{
-    "expires_in": {
+    "expiresIn": {
       "duration": 60,
       "unit": "days"
     }
@@ -450,82 +681,12 @@ curl -X POST "http://localhost:9090/apis/weather-api-v1.0/api-keys/production-ke
 ```bash
 curl -X POST "http://localhost:9090/apis/weather-api-v1.0/api-keys/production-key/regenerate" \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..." \
+  -H "Authorization: Bearer <JWT_TOKEN>" \
   -d '{
-    "expires_in": {
+    "expiresIn": {
       "duration": 60,
       "unit": "days"
     }
-  }'
-```
-
-#### Successful Response (200 OK)
-
-```json
-{
-  "api_key": {
-    "apiId": "weather-api-v1.0",
-    "api_key": "apip_18dfd4da48f276043b32d3755c8ba3b0b244569f8c0f485ad50652cb95afae70",
-    "created_at": "2025-12-22T12:26:47.626109914Z",
-    "created_by": "thivindu",
-    "expires_at": "2026-11-17T12:26:47.626109914Z",
-    "name": "production-key",
-    "operations": "[\"*\"]",
-    "status": "active"
-  },
-  "message": "API key generated successfully",
-  "status": "success"
-}
-```
-
-**Note**: The old API key value becomes invalid immediately after rotation. Update your applications with the new key value.
-
-### Revoke API Key
-
-Revoke an existing API key, making it permanently invalid for authentication.
-The user who created the key or an admin can perform this operation.
-
-**Endpoint**: `POST /apis/{id}/revoke-api-key`
-
-#### Request Parameters
-
-| Parameter | Type | Location | Required | Description |
-|-----------|------|----------|----------|-------------|
-| `id` | string | path | Yes | Unique public identifier of the API |
-
-#### Request Body
-
-```json
-{
-  "api_key": "apip_4f3c2e1d5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d"
-}
-```
-
-**Request Body Schema:**
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `api_key` | string | Yes | The actual API key value to revoke |
-
-#### Example Request
-
-**Using Basic Authentication:**
-```bash
-curl -X POST "http://localhost:9090/apis/weather-api-v1.0/revoke-api-key" \
-  -H "Content-Type: application/json" \
-  -u "username:password" \
-  -d '{
-    "api_key": "apip_4f3c2e1d5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d"
-  }'
-```
-
-**Using JWT Authentication:**
-```bash
-curl -X POST "http://localhost:9090/apis/weather-api-v1.0/revoke-api-key" \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..." \
-  -d '{
-    "api_key": "apip_4f3c2e1d5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d"
   }'
 ```
 
@@ -534,7 +695,58 @@ curl -X POST "http://localhost:9090/apis/weather-api-v1.0/revoke-api-key" \
 ```json
 {
   "status": "success",
-  "message": "API key revoked successfully"
+  "message": "API key generated successfully",
+  "remainingApiKeyQuota": 9,
+  "apiKey": {
+    "name": "production-key",
+    "apiKey": "apip_18dfd4da48f276043b32d37_bhuced7y3gfd8r4w8bcf4wg",
+    "apiId": "weather-api-v1.0",
+    "operations": "[\"*\"]",
+    "status": "active",
+    "createdAt": "2025-12-22T12:26:47.626109914Z",
+    "createdBy": "thivindu",
+    "expiresAt": "2026-11-17T12:26:47.626109914Z"
+  }
+}
+```
+
+**Note**: The old API key value becomes invalid immediately after regeneration. Update your applications with the new key value.
+
+### Revoke API Key
+
+Revoke an existing API key, making it permanently invalid for authentication.
+The user who created the key or an admin can perform this operation.
+
+**Endpoint**: `DELETE /apis/{id}/api-keys/{apiKeyName}`
+
+#### Request Parameters
+
+| Parameter | Type | Location | Required | Description |
+|-----------|------|----------|----------|-------------|
+| `id` | string | path | Yes | Unique public identifier of the API |
+| `apiKeyName` | string | path | Yes | Name of the API key to revoke |
+
+#### Example Request
+
+**Using Basic Authentication:**
+```bash
+curl -X DELETE "http://localhost:9090/apis/weather-api-v1.0/api-keys/production-key" \
+  -u "username:password"
+```
+
+**Using JWT Authentication:**
+```bash
+curl -X DELETE "http://localhost:9090/apis/weather-api-v1.0/api-keys/production-key" \
+  -H "Authorization: Bearer <JWT_TOKEN>"
+```
+
+#### Successful Response (200 OK)
+
+```json
+{
+  "status": "success",
+  "message": "API key revoked successfully",
+  "remainingApiKeyQuota": 9
 }
 ```
 
@@ -577,22 +789,86 @@ All API key management endpoints may return the following error responses:
 }
 ```
 
+### API Key Quotas
+
+The API key management system includes quota controls to limit the number of API keys a user can create per API. This helps prevent abuse and ensures fair usage of the platform.
+
+#### Key Features:
+- **Per-User, Per-API Limits**: Each user has a separate quota for each API
+- **Configurable Limits**: Administrators can configure the maximum number of API keys allowed per user per API
+- **Quota Tracking**: The system tracks remaining quota and returns this information in API responses
+- **Generation vs Regeneration**: Generating a new API key decreases the quota, while regenerating an existing key does not affect the quota
+- **Revocation Impact**: Revoking an API key increases the available quota for that user
+
+#### Response Fields:
+API key generation and regeneration responses include a `remainingApiKeyQuota` field that shows how many additional API keys the user can create for the specific API.
+
 ### API Key Format
 
 All generated API keys follow a consistent format:
 - **Prefix**: `apip_` (API Platform identifier)
-- **Length**: 64 hexadecimal characters after the prefix
-- **Total Length**: 69 characters
-- **Example**: `apip_4f3c2e1d5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d`
+- **Length**: - 64 hexadecimal characters after the prefix + "_" + 22 URL-safe characters after the prefix
+- **Total Length**: 92 characters
+- **Example**: `apip_b9abae64a955aded2eb700aff88235ce3f7e6a8ca0f2f52ba31f73bcbb960360_jh~cPInvccQ09goMO5-4mQ`
+
+### API Key Validation
+
+The platform enforces length constraints on API key values to ensure security and compatibility:
+
+| Setting | Config Key | Default | Description |
+|---------|-----------|---------|-------------|
+| Minimum Key Length | `min_key_length` | 36 | Minimum number of characters required for an API key value. The default of 36 matches UUID length. |
+| Maximum Key Length | `max_key_length` | 128 | Maximum number of characters allowed for an API key value. |
+
+These values can be configured in the gateway controller configuration under the `api_key` section. If not configured, the defaults are used. When both are configured, `min_key_length` must be less than or equal to `max_key_length`.
+
+**Note**: These constraints apply to both injected (externally provided) API keys and system-generated API keys.
+
+### API Key Security
+
+The platform implements comprehensive security measures for API key management:
+
+#### Secure Hashing
+API keys are securely hashed before being stored in the database using configurable cryptographic algorithms:
+
+- **SHA-256**: Fast and secure hashing with salt
+- **bcrypt**: Adaptive hashing with configurable cost factor  
+- **Argon2id**: Memory-hard hashing algorithm resistant to GPU attacks
+
+The hashing algorithm can be configured by administrators. If no algorithm is specified, SHA-256 is used by default.
+
+#### Masked Display
+For security reasons, API keys are masked when displayed in list operations:
+- Only the first 10 characters are shown (e.g., `apip_3521f3*********`)
+- Full API key values are only returned during generation and regeneration
+- This prevents accidental exposure in logs, screenshots, or shared screens
+
+#### Secure Storage
+- API keys are never stored in plain text
+- Only hashed values are persisted to the database
+- The system supports migration between different hashing algorithms
+- Keys are validated using constant-time comparison to prevent timing attacks
+
+#### Access Control
+- Users can only manage API keys they created
+- Administrators have access to all API keys for management purposes
+- API key operations require proper authentication (Basic Auth or JWT)
+- All operations are logged for audit purposes
 
 ### Best Practices
 
 1. **Secure Storage**: Store API keys securely and never expose them in client-side code or version control
-2. **Regular Rotation**: Rotate API keys periodically for enhanced security
-3. **Proper Naming**: Use descriptive names for API keys to identify their purpose
-4. **Expiration**: Set appropriate expiration times based on your security requirements
-5. **Immediate Revocation**: Revoke API keys immediately if they are compromised
+2. **Regular Regeneration**: Regenerate API keys periodically for enhanced security using the regenerate endpoint
+   - Use **Regenerate** for routine security rotation with automatically generated random values
+   - Use **Update** when you need to set a specific key value (e.g., migrating from external systems)
+3. **Descriptive Naming**: Use descriptive names for API keys to identify their purpose (e.g., "production-app-key", "staging-webhook")
+4. **Appropriate Expiration**: Set appropriate expiration times based on your security requirements and usage patterns
+5. **Immediate Revocation**: Revoke API keys immediately if they are compromised or no longer needed
 6. **Environment Separation**: Use different API keys for different environments (development, staging, production)
+7. **Monitor Usage**: Monitor API key usage patterns and set up alerts for unusual activity
+8. **Quota Management**: Be aware of your API key quotas and plan key generation accordingly
+9. **HTTPS Only**: Always use API keys over HTTPS to prevent interception
+10. **Logging Security**: Be cautious with logging - API keys are automatically masked in list responses but should be kept secure in application logs
 
 ## Use Cases
 
@@ -614,14 +890,18 @@ API keys used with this policy are managed by the platform's key management syst
 
 - **Generation**: Keys are generated through the gateway, management portal, or developer portal
 - **Validation**: The policy validates incoming keys against the policy engine's key store
-- **Lifecycle**: Keys can be created, rotated, revoked, and expired through platform APIs
+- **Lifecycle**: Keys can be created, injected, updated, regenerated, revoked, and expired through platform APIs
 - **Security**: Keys are securely stored and managed by the platform infrastructure in the gateway environment
 
 ## Security Considerations
 
-1. **HTTPS Only**: Always use API key authentication over HTTPS to prevent key interception
-2. **Key Rotation**: Regularly rotate API keys to maintain security
-3. **Key Storage**: Store keys securely on the client side and avoid hardcoding in source code
-4. **Monitoring**: Monitor API key usage for suspicious activity
-5. **Prefix Usage**: Use prefixes like "Bearer " to clearly identify the authentication scheme
-6. **Query Parameter Caution**: Be cautious when using query parameters as they may be logged in access logs
+1. **HTTPS Only**: Always use API key authentication over HTTPS to prevent key interception during transmission
+2. **Cryptographic Hashing**: API keys are automatically hashed using secure algorithms (SHA-256, bcrypt, or Argon2id) before storage
+3. **Key Masking**: API keys are masked in list operations showing only the first 10 characters to prevent accidental exposure
+4. **Secure Storage**: Keys are never stored in plain text - only cryptographic hashes are persisted
+5. **Regular Regeneration**: Use the regenerate endpoint to regenerate API keys regularly without affecting your quota
+6. **Access Control**: Users can only manage their own API keys; administrators have broader access for management purposes
+7. **Audit Logging**: All API key operations are logged with correlation IDs for security auditing
+8. **Quota Limits**: API key quotas prevent abuse and ensure fair resource usage across users
+9. **Timing Attack Protection**: Key validation uses constant-time comparison to prevent timing-based attacks
+10. **Query Parameter Caution**: Be careful when using API keys in query parameters as they may appear in access logs or browser history
