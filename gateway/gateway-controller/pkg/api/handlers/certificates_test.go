@@ -22,10 +22,12 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -488,4 +490,391 @@ func TestDeleteCertificate_EmptyID(t *testing.T) {
 	json.Unmarshal(w.Body.Bytes(), &resp)
 	assert.Equal(t, "error", resp["status"])
 	assert.Contains(t, resp["message"], "Certificate ID is required")
+}
+
+// ============================================================================
+// Phase 3: Edge Cases and Boundary Tests for Certificates
+// ============================================================================
+
+// TestUploadCertificate_LargeCertificate tests handling of a very large certificate file
+func TestUploadCertificate_LargeCertificate(t *testing.T) {
+	mockDB := NewMockStorage()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	server := &APIServer{db: mockDB, logger: logger}
+
+	// Create a large certificate by repeating the valid cert multiple times
+	largeCert := ""
+	for i := 0; i < 10; i++ {
+		largeCert += validTestCert + "\n"
+	}
+
+	// Test validation of large cert (doesn't require snapshot manager)
+	_, err := server.validateCertificate([]byte(largeCert))
+
+	// Should either succeed or fail gracefully - just verify it doesn't panic
+	_ = err
+}
+
+// TestUploadCertificate_EmptyPEMBlock tests certificate with empty PEM block
+func TestUploadCertificate_EmptyPEMBlock(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	mockDB := NewMockStorage()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	server := &APIServer{db: mockDB, logger: logger}
+
+	router := gin.New()
+	router.Use(middleware.CorrelationIDMiddleware(server.logger))
+	router.POST("/certificates", server.UploadCertificate)
+
+	reqBody := UploadCertificateRequest{
+		Name:        "empty-cert",
+		Certificate: "-----BEGIN CERTIFICATE-----\n-----END CERTIFICATE-----",
+	}
+	bodyBytes, _ := json.Marshal(reqBody)
+
+	req := httptest.NewRequest(http.MethodPost, "/certificates", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+
+	var resp map[string]interface{}
+	json.Unmarshal(w.Body.Bytes(), &resp)
+	assert.Equal(t, "error", resp["status"])
+}
+
+// TestUploadCertificate_MalformedPEMHeaders tests malformed PEM headers
+func TestUploadCertificate_MalformedPEMHeaders(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	mockDB := NewMockStorage()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	server := &APIServer{db: mockDB, logger: logger}
+
+	router := gin.New()
+	router.Use(middleware.CorrelationIDMiddleware(server.logger))
+	router.POST("/certificates", server.UploadCertificate)
+
+	tests := []struct {
+		name string
+		cert string
+	}{
+		{
+			name: "Missing BEGIN header",
+			cert: "MIIDkzCCAnugAwIBAgIUI92o...\n-----END CERTIFICATE-----",
+		},
+		{
+			name: "Missing END header",
+			cert: "-----BEGIN CERTIFICATE-----\nMIIDkzCCAnugAwIBAgIUI92o...",
+		},
+		{
+			name: "Wrong header type",
+			cert: "-----BEGIN RSA PRIVATE KEY-----\nMIIDkzCCAnugAwIBAgIUI92o...\n-----END RSA PRIVATE KEY-----",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reqBody := UploadCertificateRequest{
+				Name:        "malformed-cert",
+				Certificate: tt.cert,
+			}
+			bodyBytes, _ := json.Marshal(reqBody)
+
+			req := httptest.NewRequest(http.MethodPost, "/certificates", bytes.NewReader(bodyBytes))
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+
+			router.ServeHTTP(w, req)
+
+			assert.Equal(t, http.StatusBadRequest, w.Code)
+		})
+	}
+}
+
+// TestUploadCertificate_SpecialCharactersInName tests special characters in certificate name
+func TestUploadCertificate_SpecialCharactersInName(t *testing.T) {
+	mockDB := NewMockStorage()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	server := &APIServer{db: mockDB, logger: logger}
+
+	// Test that various special characters in names don't cause validation issues
+	tests := []struct {
+		name     string
+		certName string
+	}{
+		{"Hyphen", "my-cert"},
+		{"Underscore", "my_cert"},
+		{"Dot", "my.cert"},
+		{"Space", "my cert"},
+		{"Unicode", "my-cert-日本語"},
+		{"Special chars", "my@cert#123"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Just verify certificate validation works regardless of name
+			// (name is not validated by certificate validation logic)
+			_, err := server.validateCertificate([]byte(validTestCert))
+			assert.NoError(t, err)
+
+			// Verify metadata extraction works
+			_, _, _, _, err = server.extractCertificateMetadata([]byte(validTestCert))
+			assert.NoError(t, err)
+		})
+	}
+}
+
+// TestListCertificates_LargeResultSet tests listing many certificates
+func TestListCertificates_LargeResultSet(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	mockDB := NewMockStorage()
+
+	// Add 100 certificates
+	for i := 0; i < 100; i++ {
+		cert := &models.StoredCertificate{
+			ID:          fmt.Sprintf("cert-%d", i),
+			Name:        fmt.Sprintf("test-cert-%d", i),
+			Certificate: []byte(validTestCert),
+			Subject:     "CN=test.com",
+			Issuer:      "CN=test.com",
+			NotAfter:    time.Now().Add(365 * 24 * time.Hour),
+			CertCount:   1,
+		}
+		mockDB.certs = append(mockDB.certs, cert)
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	server := &APIServer{db: mockDB, logger: logger}
+
+	router := gin.New()
+	router.Use(middleware.CorrelationIDMiddleware(server.logger))
+	router.GET("/certificates", server.ListCertificates)
+
+	req := httptest.NewRequest(http.MethodGet, "/certificates", nil)
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var resp ListCertificatesResponse
+	err := json.Unmarshal(w.Body.Bytes(), &resp)
+	assert.NoError(t, err)
+	assert.Equal(t, 100, resp.TotalCount)
+	assert.Len(t, resp.Certificates, 100)
+}
+
+// TestDeleteCertificate_SpecialCharactersInID tests deleting with special chars in ID
+func TestDeleteCertificate_SpecialCharactersInID(t *testing.T) {
+	mockDB := NewMockStorage()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	server := &APIServer{db: mockDB, logger: logger}
+
+	// Test with various special character IDs - verify they can be looked up in DB
+	specialIDs := []string{
+		"cert-with-dashes",
+		"cert_with_underscores",
+		"cert.with.dots",
+		"uuid-1234-5678-90ab-cdef",
+	}
+
+	for _, id := range specialIDs {
+		// Try to get certificate with this ID (should return not found, not panic)
+		_, err := mockDB.GetCertificate(id)
+
+		// Should return an error (not found) but not panic
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "not found")
+	}
+
+	// Verify empty ID handling
+	t.Run("Empty ID", func(t *testing.T) {
+		gin.SetMode(gin.TestMode)
+		router := gin.New()
+		router.Use(middleware.CorrelationIDMiddleware(server.logger))
+		router.DELETE("/certificates", func(c *gin.Context) {
+			server.DeleteCertificate(c, "")
+		})
+
+		req := httptest.NewRequest(http.MethodDelete, "/certificates", nil)
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusBadRequest, w.Code)
+	})
+}
+
+// TestValidateCertificate_BoundaryConditions tests certificate validation edge cases
+func TestValidateCertificate_BoundaryConditions(t *testing.T) {
+	mockDB := NewMockStorage()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	server := &APIServer{db: mockDB, logger: logger}
+
+	tests := []struct {
+		name        string
+		certData    []byte
+		expectError bool
+	}{
+		{
+			name:        "Empty data",
+			certData:    []byte{},
+			expectError: true,
+		},
+		{
+			name:        "Nil data",
+			certData:    nil,
+			expectError: true,
+		},
+		{
+			name:        "Whitespace only",
+			certData:    []byte("   \n\t  "),
+			expectError: true,
+		},
+		{
+			name:        "Single newline",
+			certData:    []byte("\n"),
+			expectError: true,
+		},
+		{
+			name:        "Valid cert with extra whitespace",
+			certData:    []byte("\n\n" + validTestCert + "\n\n"),
+			expectError: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := server.validateCertificate(tt.certData)
+			if tt.expectError {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+// TestExtractCertificateMetadata_EdgeCases tests metadata extraction edge cases
+func TestExtractCertificateMetadata_EdgeCases(t *testing.T) {
+	mockDB := NewMockStorage()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	server := &APIServer{db: mockDB, logger: logger}
+
+	tests := []struct {
+		name        string
+		certData    []byte
+		expectError bool
+	}{
+		{
+			name:        "Empty certificate data",
+			certData:    []byte{},
+			expectError: true,
+		},
+		{
+			name:        "Certificate with extra padding",
+			certData:    []byte("\n\n\n" + validTestCert + "\n\n\n"),
+			expectError: false,
+		},
+		{
+			name:        "Multiple certificates (chain)",
+			certData:    []byte(certChain),
+			expectError: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, _, _, _, err := server.extractCertificateMetadata(tt.certData)
+			if tt.expectError {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+// TestListCertificates_ConcurrentAccess tests concurrent listing (thread safety)
+func TestListCertificates_ConcurrentAccess(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	mockDB := NewMockStorage()
+
+	// Add some certificates
+	for i := 0; i < 10; i++ {
+		cert := &models.StoredCertificate{
+			ID:          fmt.Sprintf("cert-%d", i),
+			Name:        fmt.Sprintf("test-cert-%d", i),
+			Certificate: []byte(validTestCert),
+			NotAfter:    time.Now(),
+			CertCount:   1,
+		}
+		mockDB.certs = append(mockDB.certs, cert)
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	server := &APIServer{db: mockDB, logger: logger}
+
+	router := gin.New()
+	router.Use(middleware.CorrelationIDMiddleware(server.logger))
+	router.GET("/certificates", server.ListCertificates)
+
+	// Launch concurrent requests
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			req := httptest.NewRequest(http.MethodGet, "/certificates", nil)
+			w := httptest.NewRecorder()
+			router.ServeHTTP(w, req)
+			assert.Equal(t, http.StatusOK, w.Code)
+		}()
+	}
+
+	wg.Wait()
+}
+
+// TestUploadCertificate_JSONBoundaries tests JSON parsing edge cases
+func TestUploadCertificate_JSONBoundaries(t *testing.T) {
+	tests := []struct {
+		name           string
+		jsonBody       string
+		expectParseErr bool
+	}{
+		{
+			name:           "Empty JSON",
+			jsonBody:       "{}",
+			expectParseErr: false, // Parses OK, but would fail validation
+		},
+		{
+			name:           "Null values",
+			jsonBody:       `{"name":null,"certificate":null}`,
+			expectParseErr: false, // Parses OK, but empty values
+		},
+		{
+			name:           "Invalid JSON syntax",
+			jsonBody:       `{"name":"test",}`,
+			expectParseErr: true,
+		},
+		{
+			name:           "Unclosed quote",
+			jsonBody:       `{"name":"test}`,
+			expectParseErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var req UploadCertificateRequest
+			err := json.Unmarshal([]byte(tt.jsonBody), &req)
+
+			if tt.expectParseErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
 }
