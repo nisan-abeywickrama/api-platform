@@ -97,6 +97,20 @@ CREATE TABLE IF NOT EXISTS gateways (
     CHECK (gateway_functionality_type IN ('regular', 'ai', 'event'))
 );
 
+-- Gateway Tokens table
+CREATE TABLE IF NOT EXISTS gateway_tokens (
+    uuid VARCHAR(40) PRIMARY KEY,
+    gateway_uuid VARCHAR(40) NOT NULL,
+    token_hash VARCHAR(255) NOT NULL,
+    salt VARCHAR(255) NOT NULL,
+    status VARCHAR(10) NOT NULL DEFAULT 'active',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    revoked_at DATETIME,
+    FOREIGN KEY (gateway_uuid) REFERENCES gateways(uuid) ON DELETE CASCADE,
+    CHECK (status IN ('active', 'revoked')),
+    CHECK (revoked_at IS NULL OR status = 'revoked')
+);
+
 -- Artifact Deployments table (immutable deployment artifacts)
 CREATE TABLE IF NOT EXISTS deployments (
     deployment_id VARCHAR(40) PRIMARY KEY,
@@ -143,20 +157,6 @@ CREATE TABLE IF NOT EXISTS association_mappings (
     FOREIGN KEY (organization_uuid) REFERENCES organizations(uuid) ON DELETE CASCADE,
     UNIQUE(artifact_uuid, resource_uuid, association_type, organization_uuid),
     CHECK (association_type IN ('gateway', 'dev_portal'))
-);
-
--- Gateway Tokens table
-CREATE TABLE IF NOT EXISTS gateway_tokens (
-    uuid VARCHAR(40) PRIMARY KEY,
-    gateway_uuid VARCHAR(40) NOT NULL,
-    token_hash VARCHAR(255) NOT NULL,
-    salt VARCHAR(255) NOT NULL,
-    status VARCHAR(10) NOT NULL DEFAULT 'active',
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    revoked_at DATETIME,
-    FOREIGN KEY (gateway_uuid) REFERENCES gateways(uuid) ON DELETE CASCADE,
-    CHECK (status IN ('active', 'revoked')),
-    CHECK (revoked_at IS NULL OR status = 'revoked')
 );
 
 -- DevPortals table
@@ -262,7 +262,6 @@ CREATE TABLE IF NOT EXISTS llm_proxies (
 
 -- Indexes for better performance
 CREATE INDEX IF NOT EXISTS idx_projects_organization_id ON projects(organization_uuid);
-CREATE INDEX IF NOT EXISTS idx_organizations_handle ON organizations(handle);
 CREATE INDEX IF NOT EXISTS idx_apis_project_id ON apis(project_uuid);
 CREATE INDEX IF NOT EXISTS idx_apis_name_context_version ON apis(name, context, version);
 CREATE INDEX IF NOT EXISTS idx_api_operations_api_uuid ON api_operations(api_uuid);
@@ -270,6 +269,7 @@ CREATE INDEX IF NOT EXISTS idx_gateways_org ON gateways(organization_uuid);
 CREATE INDEX IF NOT EXISTS idx_gateway_tokens_status ON gateway_tokens(gateway_uuid, status);
 CREATE INDEX IF NOT EXISTS idx_artifact_deployments_artifact_gateway ON deployments(artifact_uuid, gateway_uuid);
 CREATE INDEX IF NOT EXISTS idx_artifact_deployments_created_at ON deployments(artifact_uuid, gateway_uuid, created_at);
+CREATE INDEX IF NOT EXISTS idx_artifact_gw_created ON deployments(artifact_uuid, organization_uuid, gateway_uuid, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_deployment_status_deployment ON deployment_status(deployment_id);
 CREATE INDEX IF NOT EXISTS idx_deployment_status_status ON deployment_status(status);
 CREATE INDEX IF NOT EXISTS idx_devportals_org ON devportals(organization_uuid);
@@ -277,13 +277,12 @@ CREATE INDEX IF NOT EXISTS idx_devportals_active ON devportals(organization_uuid
 CREATE INDEX IF NOT EXISTS idx_publication_mappings_api ON publication_mappings(api_uuid);
 CREATE INDEX IF NOT EXISTS idx_publication_mappings_devportal ON publication_mappings(devportal_uuid);
 CREATE INDEX IF NOT EXISTS idx_publication_mappings_org ON publication_mappings(organization_uuid);
-CREATE INDEX IF NOT EXISTS idx_publication_mappings_api_devportal_org ON publication_mappings(api_uuid, devportal_uuid, organization_uuid);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_devportals_default_per_org ON devportals(organization_uuid) WHERE is_default = TRUE;
 CREATE INDEX IF NOT EXISTS idx_artifact_associations_artifact_resource_type ON association_mappings(artifact_uuid, association_type, organization_uuid);
 CREATE INDEX IF NOT EXISTS idx_association_mappings_resource ON association_mappings(association_type, resource_uuid, organization_uuid);
 CREATE INDEX IF NOT EXISTS idx_association_mappings_org ON association_mappings(organization_uuid);
+CREATE INDEX IF NOT EXISTS idx_artifacts_org ON artifacts(organization_uuid);
 CREATE INDEX IF NOT EXISTS idx_llm_provider_templates_org ON llm_provider_templates(organization_uuid);
-CREATE INDEX IF NOT EXISTS idx_llm_provider_templates_handle ON llm_provider_templates(organization_uuid, handle);
 CREATE INDEX IF NOT EXISTS idx_llm_providers_template ON llm_providers(template);
 CREATE INDEX IF NOT EXISTS idx_llm_proxies_project ON llm_proxies(project_uuid);
 CREATE INDEX IF NOT EXISTS idx_llm_proxies_provider_uuid ON llm_proxies(provider_uuid);

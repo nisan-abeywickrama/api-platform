@@ -159,6 +159,7 @@ CREATE TABLE IF NOT EXISTS association_mappings (
     CHECK (association_type IN ('gateway', 'dev_portal'))
 );
 
+-- DevPortals table
 CREATE TABLE IF NOT EXISTS devportals (
     uuid VARCHAR(40) PRIMARY KEY,
     organization_uuid VARCHAR(40) NOT NULL,
@@ -172,6 +173,19 @@ CREATE TABLE IF NOT EXISTS devportals (
     is_enabled BOOLEAN DEFAULT FALSE,
     is_default BOOLEAN DEFAULT FALSE,
     visibility VARCHAR(20) NOT NULL DEFAULT 'private',
+    description VARCHAR(500),
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (organization_uuid) REFERENCES organizations(uuid) ON DELETE CASCADE,
+    UNIQUE(organization_uuid, api_url),
+    UNIQUE(organization_uuid, hostname)
+);
+
+-- API-DevPortal Publication Tracking Table
+-- This table tracks which APIs are published to which DevPortals
+CREATE TABLE IF NOT EXISTS publication_mappings (
+    api_uuid VARCHAR(40) NOT NULL,
+    devportal_uuid VARCHAR(40) NOT NULL,
     organization_uuid VARCHAR(40) NOT NULL,
     status VARCHAR(20) NOT NULL CHECK (status IN ('published', 'failed', 'publishing')),
     api_version VARCHAR(50),
@@ -248,7 +262,6 @@ CREATE TABLE IF NOT EXISTS llm_proxies (
 
 -- Indexes for better performance
 CREATE INDEX IF NOT EXISTS idx_projects_organization_id ON projects(organization_uuid);
-CREATE INDEX IF NOT EXISTS idx_organizations_handle ON organizations(handle);
 CREATE INDEX IF NOT EXISTS idx_apis_project_id ON apis(project_uuid);
 CREATE INDEX IF NOT EXISTS idx_apis_name_context_version ON apis(name, context, version);
 CREATE INDEX IF NOT EXISTS idx_api_operations_api_uuid ON api_operations(api_uuid);
@@ -256,6 +269,7 @@ CREATE INDEX IF NOT EXISTS idx_gateways_org ON gateways(organization_uuid);
 CREATE INDEX IF NOT EXISTS idx_gateway_tokens_status ON gateway_tokens(gateway_uuid, status);
 CREATE INDEX IF NOT EXISTS idx_artifact_deployments_artifact_gateway ON deployments(artifact_uuid, gateway_uuid);
 CREATE INDEX IF NOT EXISTS idx_artifact_deployments_created_at ON deployments(artifact_uuid, gateway_uuid, created_at);
+CREATE INDEX IF NOT EXISTS idx_artifact_gw_created ON deployments(artifact_uuid, organization_uuid, gateway_uuid, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_deployment_status_deployment ON deployment_status(deployment_id);
 CREATE INDEX IF NOT EXISTS idx_deployment_status_status ON deployment_status(status);
 CREATE INDEX IF NOT EXISTS idx_devportals_org ON devportals(organization_uuid);
@@ -263,13 +277,12 @@ CREATE INDEX IF NOT EXISTS idx_devportals_active ON devportals(organization_uuid
 CREATE INDEX IF NOT EXISTS idx_publication_mappings_api ON publication_mappings(api_uuid);
 CREATE INDEX IF NOT EXISTS idx_publication_mappings_devportal ON publication_mappings(devportal_uuid);
 CREATE INDEX IF NOT EXISTS idx_publication_mappings_org ON publication_mappings(organization_uuid);
-CREATE INDEX IF NOT EXISTS idx_publication_mappings_api_devportal_org ON publication_mappings(api_uuid, devportal_uuid, organization_uuid);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_devportals_default_per_org ON devportals(organization_uuid) WHERE is_default = 1;
 CREATE INDEX IF NOT EXISTS idx_artifact_associations_artifact_resource_type ON association_mappings(artifact_uuid, association_type, organization_uuid);
 CREATE INDEX IF NOT EXISTS idx_association_mappings_resource ON association_mappings(association_type, resource_uuid, organization_uuid);
 CREATE INDEX IF NOT EXISTS idx_association_mappings_org ON association_mappings(organization_uuid);
+CREATE INDEX IF NOT EXISTS idx_artifacts_org ON artifacts(organization_uuid);
 CREATE INDEX IF NOT EXISTS idx_llm_provider_templates_org ON llm_provider_templates(organization_uuid);
-CREATE INDEX IF NOT EXISTS idx_llm_provider_templates_handle ON llm_provider_templates(organization_uuid, handle);
 CREATE INDEX IF NOT EXISTS idx_llm_providers_template ON llm_providers(template);
 CREATE INDEX IF NOT EXISTS idx_llm_proxies_project ON llm_proxies(project_uuid);
 CREATE INDEX IF NOT EXISTS idx_llm_proxies_provider_uuid ON llm_proxies(provider_uuid);
