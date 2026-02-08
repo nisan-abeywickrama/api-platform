@@ -429,8 +429,10 @@ func TestApplyAPIUpdatesUpdatesPolicies(t *testing.T) {
 	existing := &model.API{
 		Handle:  "pets-api",
 		Version: "v1",
-		Policies: []model.Policy{
-			{Name: "legacy-policy", Version: "v1"},
+		Configuration: model.RestAPIConfig{
+			Policies: []model.Policy{
+				{Name: "legacy-policy", Version: "v1"},
+			},
 		},
 	}
 

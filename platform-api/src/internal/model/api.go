@@ -28,7 +28,6 @@ type API struct {
 	Name            string           `json:"name" db:"name"`
 	Kind            string           `json:"kind" db:"kind"`
 	Description     string           `json:"description,omitempty" db:"description"`
-	Context         string           `json:"context" db:"context"`
 	Version         string           `json:"version" db:"version"`
 	CreatedBy       string           `json:"createdBy,omitempty" db:"created_by"`
 	ProjectID       string           `json:"projectId" db:"project_uuid"`           // FK to Project.ID
@@ -37,10 +36,7 @@ type API struct {
 	UpdatedAt       time.Time        `json:"updatedAt,omitempty" db:"updated_at"`
 	LifeCycleStatus string          `json:"lifeCycleStatus,omitempty" db:"lifecycle_status"`
 	Transport       []string        `json:"transport,omitempty" db:"transport"`
-	Policies        []Policy        `json:"policies,omitempty"`
-	Operations      []Operation     `json:"operations,omitempty"`
 	Channels        []Channel       `json:"channels,omitempty"`
-	Upstream        *UpstreamConfig `json:"upstream,omitempty" db:"-"`
 	Configuration   RestAPIConfig    `json:"configuration" db:"-"`
 }
 

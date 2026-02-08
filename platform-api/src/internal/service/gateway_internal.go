@@ -180,7 +180,6 @@ func (s *GatewayInternalAPIService) CreateGatewayAPIDeployment(apiHandle, orgID,
 		newAPI := &model.API{
 			Handle:          apiHandle, // Use provided apiID as handle
 			Name:            notification.Configuration.Spec.Name,
-			Context:         notification.Configuration.Spec.Context,
 			Version:         notification.Configuration.Spec.Version,
 			ProjectID:       projectID,
 			OrganizationID:  orgID,
@@ -188,9 +187,12 @@ func (s *GatewayInternalAPIService) CreateGatewayAPIDeployment(apiHandle, orgID,
 			LifeCycleStatus: "CREATED",
 			Kind:            constants.RestApi,
 			Transport:       []string{"http", "https"},
-			Operations:      operations,
-			CreatedAt:       now,
-			UpdatedAt:       now,
+			Configuration: model.RestAPIConfig{
+				Context:    &notification.Configuration.Spec.Context,
+				Operations: operations,
+			},
+			CreatedAt: now,
+			UpdatedAt: now,
 		}
 
 		err = s.apiRepo.CreateAPI(newAPI)

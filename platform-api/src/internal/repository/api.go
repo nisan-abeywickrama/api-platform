@@ -96,7 +96,7 @@ func (r *APIRepo) CreateAPI(api *model.API) error {
 	}
 
 	// Insert Operations
-	for _, operation := range api.Operations {
+	for _, operation := range api.Configuration.Operations {
 		if err := r.insertOperation(tx, api.ID, api.OrganizationID, &operation); err != nil {
 			return err
 		}
@@ -412,7 +412,7 @@ func (r *APIRepo) UpdateAPI(api *model.API) error {
 	}
 
 	// Re-insert operations
-	for _, operation := range api.Operations {
+	for _, operation := range api.Configuration.Operations {
 		if err := r.insertOperation(tx, api.ID, api.OrganizationID, &operation); err != nil {
 			return err
 		}
@@ -487,7 +487,7 @@ func (r *APIRepo) loadAPIConfigurations(api *model.API) error {
 	if operations, err := r.loadOperations(api.ID); err != nil {
 		return err
 	} else {
-		api.Operations = operations
+		api.Configuration.Operations = operations
 	}
 
 	// Load Channels

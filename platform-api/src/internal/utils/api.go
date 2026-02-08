@@ -53,17 +53,13 @@ func (u *APIUtil) DTOToModel(dto *dto.API) *model.API {
 		Name:            dto.Name,
 		Kind:            dto.Kind,
 		Description:     dto.Description,
-		Context:         dto.Context,
 		Version:         dto.Version,
 		CreatedBy:       dto.CreatedBy,
 		ProjectID:       dto.ProjectID,
 		OrganizationID:  dto.OrganizationID,
 		LifeCycleStatus: dto.LifeCycleStatus,
 		Transport:       dto.Transport,
-		Policies:        u.PoliciesDTOToModel(dto.Policies),
-		Operations:      u.OperationsDTOToModel(dto.Operations),
 		Channels:        u.ChannelsDTOToModel(dto.Channels),
-		Upstream:        u.UpstreamConfigDTOToModel(dto.Upstream),
 		Configuration:   *u.dtoToRestApiConfig(dto),
 	}
 }
@@ -81,7 +77,7 @@ func (u *APIUtil) ModelToDTO(model *model.API) *dto.API {
 		Name:            model.Name,
 		Kind:            model.Kind,
 		Description:     model.Description,
-		Context:         model.Context,
+		Context:         defaultStringPtr(model.Configuration.Context),
 		Version:         model.Version,
 		CreatedBy:       model.CreatedBy,
 		ProjectID:       model.ProjectID,
@@ -1243,4 +1239,12 @@ func (u *APIUtil) MergeAPIDetails(userAPI *dto.API, extractedAPI *dto.API) *dto.
 	merged.Operations = extractedAPI.Operations
 
 	return merged
+}
+
+// defaultStringPtr returns the string value if not nil, otherwise empty string
+func defaultStringPtr(s *string) string {
+	if s != nil {
+		return *s
+	}
+	return ""
 }
