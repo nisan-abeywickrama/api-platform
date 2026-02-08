@@ -1009,6 +1009,15 @@ func mapProviderModelToDTO(m *model.LLMProvider, templateHandle string) *dto.LLM
 			out.Policies = append(out.Policies, dto.LLMPolicy{Name: p.Name, Version: p.Version, Paths: paths})
 		}
 	}
+	if out.ModelProviders == nil {
+		out.ModelProviders = []dto.LLMModelProvider{}
+	}
+	if out.Policies == nil {
+		out.Policies = []dto.LLMPolicy{}
+	}
+	if out.AccessControl.Exceptions == nil {
+		out.AccessControl.Exceptions = []dto.RouteException{}
+	}
 	return out
 }
 
@@ -1296,6 +1305,9 @@ func mapProxyModelToDTO(m *model.LLMProxy) *dto.LLMProxy {
 			}
 			out.Policies = append(out.Policies, dto.LLMPolicy{Name: p.Name, Version: p.Version, Paths: paths})
 		}
+	}
+	if out.Policies == nil {
+		out.Policies = []dto.LLMPolicy{}
 	}
 	return out
 }
