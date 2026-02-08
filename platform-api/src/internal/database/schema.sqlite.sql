@@ -238,6 +238,7 @@ CREATE TABLE IF NOT EXISTS llm_providers (
     access_control TEXT,
     policies TEXT,
     status VARCHAR(20) NOT NULL DEFAULT 'CREATED',
+    configuration TEXT NOT NULL,
     FOREIGN KEY (uuid) REFERENCES artifacts(uuid) ON DELETE CASCADE,
     FOREIGN KEY (template) REFERENCES llm_provider_templates(handle) ON UPDATE CASCADE ON DELETE RESTRICT
 );
@@ -255,6 +256,7 @@ CREATE TABLE IF NOT EXISTS llm_proxies (
     openapi_spec TEXT,
     policies TEXT,
     status VARCHAR(20) NOT NULL DEFAULT 'CREATED',
+    configuration TEXT NOT NULL,
     FOREIGN KEY (uuid) REFERENCES artifacts(uuid) ON DELETE CASCADE,
     FOREIGN KEY (project_uuid) REFERENCES projects(uuid) ON DELETE CASCADE,
     FOREIGN KEY (provider_uuid) REFERENCES llm_providers(uuid) ON DELETE RESTRICT

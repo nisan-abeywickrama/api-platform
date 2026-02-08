@@ -306,16 +306,21 @@ func (r *LLMProviderRepo) Create(p *model.LLMProvider) error {
 		return fmt.Errorf("failed to create artifact: %w", err)
 	}
 
+	configurationJSON, err := serializeLLMProviderConfiguration(p.Configuration)
+	if err != nil {
+		return fmt.Errorf("failed to serialize configuration: %w", err)
+	}
+
 	// Insert into llm_providers table
 	_, err = tx.Exec(`
 		INSERT INTO llm_providers (
 			uuid, description, created_by, context, vhost, template,
-			upstream_url, upstream_auth, openapi_spec, model_list, rate_limiting, access_control, policies, status
+			upstream_url, upstream_auth, openapi_spec, model_list, rate_limiting, access_control, policies, status, configuration
 		)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		p.UUID, p.Description, p.CreatedBy, p.Context, p.VHost, p.Template,
 		upstreamURL, string(upstreamAuthJSON), p.OpenAPISpec, string(modelProvidersJSON), string(rateLimitingJSON),
-		string(accessControlJSON), policiesColumn, p.Status,
+		string(accessControlJSON), policiesColumn, p.Status, configurationJSON,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create provider: %w", err)
@@ -332,7 +337,7 @@ func (r *LLMProviderRepo) GetByID(providerID, orgUUID string) (*model.LLMProvide
 		SELECT
 			a.uuid, a.handle, a.name, a.version, a.organization_uuid, a.created_at, a.updated_at,
 			p.description, p.created_by, p.context, p.vhost, p.template,
-			p.upstream_url, p.upstream_auth, p.openapi_spec, p.model_list, p.rate_limiting, p.access_control, p.policies, p.status
+			p.upstream_url, p.upstream_auth, p.openapi_spec, p.model_list, p.rate_limiting, p.access_control, p.policies, p.status, p.configuration
 		FROM artifacts a
 		JOIN llm_providers p ON a.uuid = p.uuid
 		WHERE a.handle = ? AND a.organization_uuid = ? AND a.kind = ?
@@ -340,17 +345,25 @@ func (r *LLMProviderRepo) GetByID(providerID, orgUUID string) (*model.LLMProvide
 
 	var p model.LLMProvider
 	var upstreamURL, openAPISpec, modelProvidersRaw sql.NullString
-	var upstreamAuthJSON, rateLimitingJSON, accessControlJSON, policiesJSON sql.NullString
+	var upstreamAuthJSON, rateLimitingJSON, accessControlJSON, policiesJSON, configurationJSON sql.NullString
 	if err := row.Scan(
 		&p.UUID, &p.ID, &p.Name, &p.Version, &p.OrganizationUUID, &p.CreatedAt, &p.UpdatedAt,
 		&p.Description, &p.CreatedBy, &p.Context, &p.VHost, &p.Template,
 		&upstreamURL, &upstreamAuthJSON, &openAPISpec, &modelProvidersRaw, &rateLimitingJSON,
-		&accessControlJSON, &policiesJSON, &p.Status,
+		&accessControlJSON, &policiesJSON, &p.Status, &configurationJSON,
 	); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
 		return nil, err
+	}
+
+	if configurationJSON.Valid && configurationJSON.String != "" {
+		if config, err := deserializeLLMProviderConfiguration(configurationJSON); err != nil {
+			return nil, fmt.Errorf("unmarshal configuration for provider %s: %w", p.ID, err)
+		} else if config != nil {
+			p.Configuration = *config
+		}
 	}
 
 	// Populate Upstream structure from database fields
@@ -402,7 +415,7 @@ func (r *LLMProviderRepo) List(orgUUID string, limit, offset int) ([]*model.LLMP
 		SELECT
 			a.uuid, a.handle, a.name, a.version, a.organization_uuid, a.created_at, a.updated_at,
 			p.description, p.created_by, p.context, p.vhost, p.template,
-			p.upstream_url, p.upstream_auth, p.openapi_spec, p.model_list, p.rate_limiting, p.access_control, p.policies, p.status
+			p.upstream_url, p.upstream_auth, p.openapi_spec, p.model_list, p.rate_limiting, p.access_control, p.policies, p.status, p.configuration
 		FROM artifacts a
 		JOIN llm_providers p ON a.uuid = p.uuid
 		WHERE a.organization_uuid = ? AND a.kind = ?
@@ -418,12 +431,12 @@ func (r *LLMProviderRepo) List(orgUUID string, limit, offset int) ([]*model.LLMP
 	for rows.Next() {
 		var p model.LLMProvider
 		var upstreamURL, openAPISpec, modelProvidersRaw sql.NullString
-		var upstreamAuthJSON, rateLimitingJSON, accessControlJSON, policiesJSON sql.NullString
+		var upstreamAuthJSON, rateLimitingJSON, accessControlJSON, policiesJSON, configurationJSON sql.NullString
 		err := rows.Scan(
 			&p.UUID, &p.ID, &p.Name, &p.Version, &p.OrganizationUUID, &p.CreatedAt, &p.UpdatedAt,
 			&p.Description, &p.CreatedBy, &p.Context, &p.VHost, &p.Template,
 			&upstreamURL, &upstreamAuthJSON, &openAPISpec, &modelProvidersRaw, &rateLimitingJSON,
-			&accessControlJSON, &policiesJSON, &p.Status,
+			&accessControlJSON, &policiesJSON, &p.Status, &configurationJSON,
 		)
 		if err != nil {
 			return nil, err
@@ -465,6 +478,13 @@ func (r *LLMProviderRepo) List(orgUUID string, limit, offset int) ([]*model.LLMP
 		if accessControlJSON.Valid && accessControlJSON.String != "" {
 			if err := json.Unmarshal([]byte(accessControlJSON.String), &p.AccessControl); err != nil {
 				return nil, fmt.Errorf("unmarshal accessControl for provider %s: %w", p.ID, err)
+			}
+		}
+		if configurationJSON.Valid && configurationJSON.String != "" {
+			if config, err := deserializeLLMProviderConfiguration(configurationJSON); err != nil {
+				return nil, fmt.Errorf("unmarshal configuration for provider %s: %w", p.ID, err)
+			} else if config != nil {
+				p.Configuration = *config
 			}
 		}
 		res = append(res, &p)
@@ -512,6 +532,10 @@ func (r *LLMProviderRepo) Update(p *model.LLMProvider) error {
 			}
 		}
 	}
+	configurationJSON, err := serializeLLMProviderConfiguration(p.Configuration)
+	if err != nil {
+		return fmt.Errorf("failed to serialize configuration: %w", err)
+	}
 
 	tx, err := r.db.Begin()
 	if err != nil {
@@ -547,11 +571,11 @@ func (r *LLMProviderRepo) Update(p *model.LLMProvider) error {
 	result, err := tx.Exec(`
 		UPDATE llm_providers
 		SET description = ?, context = ?, vhost = ?, template = ?,
-			upstream_url = ?, upstream_auth = ?, openapi_spec = ?, model_list = ?, rate_limiting = ?, access_control = ?, policies = ?, status = ?
+			upstream_url = ?, upstream_auth = ?, openapi_spec = ?, model_list = ?, rate_limiting = ?, access_control = ?, policies = ?, status = ?, configuration = ?
 		WHERE uuid = ?`,
 		p.Description, p.Context, p.VHost, p.Template,
 		upstreamURL, string(upstreamAuthJSON), p.OpenAPISpec, string(modelProvidersJSON), string(rateLimitingJSON),
-		string(accessControlJSON), policiesColumn, p.Status,
+		string(accessControlJSON), policiesColumn, p.Status, configurationJSON,
 		providerUUID,
 	)
 	if err != nil {
@@ -635,6 +659,10 @@ func (r *LLMProxyRepo) Create(p *model.LLMProxy) error {
 	if err != nil {
 		return err
 	}
+	configurationJSON, err := serializeLLMProxyConfiguration(p.Configuration)
+	if err != nil {
+		return fmt.Errorf("failed to serialize configuration: %w", err)
+	}
 
 	tx, err := r.db.Begin()
 	if err != nil {
@@ -658,11 +686,11 @@ func (r *LLMProxyRepo) Create(p *model.LLMProxy) error {
 	_, err = tx.Exec(`
 		INSERT INTO llm_proxies (
 			uuid, project_uuid, description, created_by, context, vhost, provider, provider_uuid,
-			openapi_spec, policies, status
+			openapi_spec, policies, status, configuration
 		)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		p.UUID, p.ProjectUUID, p.Description, p.CreatedBy, p.Context, p.VHost, p.Provider, p.ProviderUUID,
-		p.OpenAPISpec, policiesColumn, p.Status,
+		p.OpenAPISpec, policiesColumn, p.Status, configurationJSON,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create proxy: %w", err)
@@ -679,18 +707,18 @@ func (r *LLMProxyRepo) GetByID(proxyID, orgUUID string) (*model.LLMProxy, error)
 		SELECT
 			a.uuid, a.handle, a.name, a.version, a.organization_uuid, a.created_at, a.updated_at,
 			p.project_uuid, p.description, p.created_by, p.context, p.vhost, p.provider, p.provider_uuid,
-			p.openapi_spec, p.policies, p.status
+			p.openapi_spec, p.policies, p.status, p.configuration
 		FROM artifacts a
 		JOIN llm_proxies p ON a.uuid = p.uuid
 		WHERE a.handle = ? AND a.organization_uuid = ? AND a.kind = ?
 	`, proxyID, orgUUID, constants.LLMProxy)
 
 	var p model.LLMProxy
-	var openAPISpec, policiesJSON sql.NullString
+	var openAPISpec, policiesJSON, configurationJSON sql.NullString
 	if err := row.Scan(
 		&p.UUID, &p.ID, &p.Name, &p.Version, &p.OrganizationUUID, &p.CreatedAt, &p.UpdatedAt,
 		&p.ProjectUUID, &p.Description, &p.CreatedBy, &p.Context, &p.VHost, &p.Provider, &p.ProviderUUID,
-		&openAPISpec, &policiesJSON, &p.Status,
+		&openAPISpec, &policiesJSON, &p.Status, &configurationJSON,
 	); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
@@ -706,6 +734,13 @@ func (r *LLMProxyRepo) GetByID(proxyID, orgUUID string) (*model.LLMProxy, error)
 		return nil, fmt.Errorf("unmarshal policies for proxy %s: %w", p.ID, err)
 	}
 	p.Policies = policies
+	if configurationJSON.Valid && configurationJSON.String != "" {
+		if config, err := deserializeLLMProxyConfiguration(configurationJSON); err != nil {
+			return nil, fmt.Errorf("unmarshal configuration for proxy %s: %w", p.ID, err)
+		} else if config != nil {
+			p.Configuration = *config
+		}
+	}
 
 	return &p, nil
 }
@@ -715,7 +750,7 @@ func (r *LLMProxyRepo) List(orgUUID string, limit, offset int) ([]*model.LLMProx
 		SELECT
 			a.uuid, a.handle, a.name, a.version, a.organization_uuid, a.created_at, a.updated_at,
 			p.project_uuid, p.description, p.created_by, p.context, p.vhost, p.provider, p.provider_uuid,
-			p.openapi_spec, p.policies, p.status
+			p.openapi_spec, p.policies, p.status, p.configuration
 		FROM artifacts a
 		JOIN llm_proxies p ON a.uuid = p.uuid
 		WHERE a.organization_uuid = ? AND a.kind = ?
@@ -730,11 +765,11 @@ func (r *LLMProxyRepo) List(orgUUID string, limit, offset int) ([]*model.LLMProx
 	var res []*model.LLMProxy
 	for rows.Next() {
 		var p model.LLMProxy
-		var openAPISpec, policiesJSON sql.NullString
+		var openAPISpec, policiesJSON, configurationJSON sql.NullString
 		err := rows.Scan(
 			&p.UUID, &p.ID, &p.Name, &p.Version, &p.OrganizationUUID, &p.CreatedAt, &p.UpdatedAt,
 			&p.ProjectUUID, &p.Description, &p.CreatedBy, &p.Context, &p.VHost, &p.Provider, &p.ProviderUUID,
-			&openAPISpec, &policiesJSON, &p.Status,
+			&openAPISpec, &policiesJSON, &p.Status, &configurationJSON,
 		)
 		if err != nil {
 			return nil, err
@@ -747,6 +782,13 @@ func (r *LLMProxyRepo) List(orgUUID string, limit, offset int) ([]*model.LLMProx
 			return nil, fmt.Errorf("unmarshal policies for proxy %s: %w", p.ID, err)
 		}
 		p.Policies = policies
+		if configurationJSON.Valid && configurationJSON.String != "" {
+			if config, err := deserializeLLMProxyConfiguration(configurationJSON); err != nil {
+				return nil, fmt.Errorf("unmarshal configuration for proxy %s: %w", p.ID, err)
+			} else if config != nil {
+				p.Configuration = *config
+			}
+		}
 		res = append(res, &p)
 	}
 	return res, rows.Err()
@@ -757,7 +799,7 @@ func (r *LLMProxyRepo) ListByProject(orgUUID, projectUUID string, limit, offset 
 		SELECT
 			a.uuid, a.handle, a.name, a.version, a.organization_uuid, a.created_at, a.updated_at,
 			p.project_uuid, p.description, p.created_by, p.context, p.vhost, p.provider, p.provider_uuid,
-			p.openapi_spec, p.policies, p.status
+			p.openapi_spec, p.policies, p.status, p.configuration
 		FROM artifacts a
 		JOIN llm_proxies p ON a.uuid = p.uuid
 		WHERE a.organization_uuid = ? AND p.project_uuid = ? AND a.kind = ?
@@ -772,11 +814,11 @@ func (r *LLMProxyRepo) ListByProject(orgUUID, projectUUID string, limit, offset 
 	var res []*model.LLMProxy
 	for rows.Next() {
 		var p model.LLMProxy
-		var openAPISpec, policiesJSON sql.NullString
+		var openAPISpec, policiesJSON, configurationJSON sql.NullString
 		err := rows.Scan(
 			&p.UUID, &p.ID, &p.Name, &p.Version, &p.OrganizationUUID, &p.CreatedAt, &p.UpdatedAt,
 			&p.ProjectUUID, &p.Description, &p.CreatedBy, &p.Context, &p.VHost, &p.Provider, &p.ProviderUUID,
-			&openAPISpec, &policiesJSON, &p.Status,
+			&openAPISpec, &policiesJSON, &p.Status, &configurationJSON,
 		)
 		if err != nil {
 			return nil, err
@@ -789,6 +831,13 @@ func (r *LLMProxyRepo) ListByProject(orgUUID, projectUUID string, limit, offset 
 			return nil, fmt.Errorf("unmarshal policies for proxy %s: %w", p.ID, err)
 		}
 		p.Policies = policies
+		if configurationJSON.Valid && configurationJSON.String != "" {
+			if config, err := deserializeLLMProxyConfiguration(configurationJSON); err != nil {
+				return nil, fmt.Errorf("unmarshal configuration for proxy %s: %w", p.ID, err)
+			} else if config != nil {
+				p.Configuration = *config
+			}
+		}
 		res = append(res, &p)
 	}
 	return res, rows.Err()
@@ -799,7 +848,7 @@ func (r *LLMProxyRepo) ListByProvider(orgUUID, providerID string, limit, offset 
 		SELECT
 			a.uuid, a.handle, a.name, a.version, a.organization_uuid, a.created_at, a.updated_at,
 			p.project_uuid, p.description, p.created_by, p.context, p.vhost, p.provider, p.provider_uuid,
-			p.openapi_spec, p.policies, p.status
+			p.openapi_spec, p.policies, p.status, p.configuration
 		FROM artifacts a
 		JOIN llm_proxies p ON a.uuid = p.uuid
 		WHERE a.organization_uuid = ? AND p.provider = ? AND a.kind = ?
@@ -814,11 +863,11 @@ func (r *LLMProxyRepo) ListByProvider(orgUUID, providerID string, limit, offset 
 	var res []*model.LLMProxy
 	for rows.Next() {
 		var p model.LLMProxy
-		var openAPISpec, policiesJSON sql.NullString
+		var openAPISpec, policiesJSON, configurationJSON sql.NullString
 		err := rows.Scan(
 			&p.UUID, &p.ID, &p.Name, &p.Version, &p.OrganizationUUID, &p.CreatedAt, &p.UpdatedAt,
 			&p.ProjectUUID, &p.Description, &p.CreatedBy, &p.Context, &p.VHost, &p.Provider, &p.ProviderUUID,
-			&openAPISpec, &policiesJSON, &p.Status,
+			&openAPISpec, &policiesJSON, &p.Status, &configurationJSON,
 		)
 		if err != nil {
 			return nil, err
@@ -831,6 +880,13 @@ func (r *LLMProxyRepo) ListByProvider(orgUUID, providerID string, limit, offset 
 			return nil, fmt.Errorf("unmarshal policies for proxy %s: %w", p.ID, err)
 		}
 		p.Policies = policies
+		if configurationJSON.Valid && configurationJSON.String != "" {
+			if config, err := deserializeLLMProxyConfiguration(configurationJSON); err != nil {
+				return nil, fmt.Errorf("unmarshal configuration for proxy %s: %w", p.ID, err)
+			} else if config != nil {
+				p.Configuration = *config
+			}
+		}
 		res = append(res, &p)
 	}
 	return res, rows.Err()
@@ -880,6 +936,10 @@ func (r *LLMProxyRepo) Update(p *model.LLMProxy) error {
 	if err != nil {
 		return err
 	}
+	configurationJSON, err := serializeLLMProxyConfiguration(p.Configuration)
+	if err != nil {
+		return fmt.Errorf("failed to serialize configuration: %w", err)
+	}
 
 	tx, err := r.db.Begin()
 	if err != nil {
@@ -915,10 +975,10 @@ func (r *LLMProxyRepo) Update(p *model.LLMProxy) error {
 	result, err := tx.Exec(`
 		UPDATE llm_proxies
 		SET description = ?, context = ?, vhost = ?, provider = ?, provider_uuid = ?,
-			openapi_spec = ?, policies = ?, status = ?
+			openapi_spec = ?, policies = ?, status = ?, configuration = ?
 		WHERE uuid = ?`,
 		p.Description, p.Context, p.VHost, p.Provider, p.ProviderUUID,
-		p.OpenAPISpec, policiesColumn, p.Status,
+		p.OpenAPISpec, policiesColumn, p.Status, configurationJSON,
 		proxyUUID,
 	)
 	if err != nil {
@@ -1010,4 +1070,42 @@ func unmarshalPolicies(policiesJSON sql.NullString) ([]model.LLMPolicy, error) {
 		return nil, err
 	}
 	return policies, nil
+}
+
+func serializeLLMProviderConfiguration(config model.LLMProviderConfig) (string, error) {
+	configJSON, err := json.Marshal(config)
+	if err != nil {
+		return "", err
+	}
+	return string(configJSON), nil
+}
+
+func deserializeLLMProviderConfiguration(configJSON sql.NullString) (*model.LLMProviderConfig, error) {
+	if !configJSON.Valid || configJSON.String == "" {
+		return nil, fmt.Errorf("null configuration")
+	}
+	var config model.LLMProviderConfig
+	if err := json.Unmarshal([]byte(configJSON.String), &config); err != nil {
+		return nil, err
+	}
+	return &config, nil
+}
+
+func serializeLLMProxyConfiguration(config model.LLMProxyConfig) (string, error) {
+	configJSON, err := json.Marshal(config)
+	if err != nil {
+		return "", err
+	}
+	return string(configJSON), nil
+}
+
+func deserializeLLMProxyConfiguration(configJSON sql.NullString) (*model.LLMProxyConfig, error) {
+	if !configJSON.Valid || configJSON.String == "" {
+		return nil, fmt.Errorf("null configuration")
+	}
+	var config model.LLMProxyConfig
+	if err := json.Unmarshal([]byte(configJSON.String), &config); err != nil {
+		return nil, err
+	}
+	return &config, nil
 }
