@@ -205,30 +205,46 @@ type PostgresConfig struct {
 // RouterConfig holds router (Envoy) related configuration
 type RouterConfig struct {
 	AccessLogs    AccessLogsConfig `koanf:"access_logs"`
-	ListenerPort  int              `koanf:"listener_port"`
-	HTTPSEnabled  bool             `koanf:"https_enabled"`
-	HTTPSPort     int              `koanf:"https_port"`
-	GatewayHost   string           `koanf:"gateway_host"`
-	Lua           RouterLuaConfig  `koanf:"lua"`
-	LuaScriptPath string           `koanf:"lua_script_path"` // Deprecated: use router.lua.request_transformation.script_path
-	// Downstream holds downstream-side configuration (TLS and route timeouts)
-	Downstream envoyDownstream `koanf:"envoy_downstream"`
-	// EnvoyUpstreamCluster holds upstream cluster-level settings (connect timeout)
-	EnvoyUpstreamCluster EnvoyUpstreamClusterConfig `koanf:"envoy_upstream"`
-	PolicyEngine         PolicyEngineConfig         `koanf:"policy_engine"`
-	DownstreamTLS        DownstreamTLS              `koanf:"downstream_tls"`
-	EventGateway         EventGatewayConfig         `koanf:"event_gateway"`
-	VHosts               VHostsConfig               `koanf:"vhosts"`
-	// Tracing holds OpenTelemetry exporter configuration
+	ListenerPort  int             `koanf:"listener_port"`
+	HTTPSEnabled  bool            `koanf:"https_enabled"`
+	HTTPSPort     int             `koanf:"https_port"`
+	GatewayHost   string          `koanf:"gateway_host"`
+	Lua           RouterLuaConfig `koanf:"lua"`
+	LuaScriptPath string          `koanf:"lua_script_path"` // Deprecated: use router.lua.request_transformation.script_path
+	// Upstream holds upstream-side configuration (TLS and timeouts: route, idle, connect)
+	Upstream       RouterUpstream       `koanf:"upstream"`
+	PolicyEngine   PolicyEngineConfig   `koanf:"policy_engine"`
+	DownstreamTLS  DownstreamTLS        `koanf:"downstream_tls"`
+	EventGateway  EventGatewayConfig   `koanf:"event_gateway"`
+	VHosts        VHostsConfig         `koanf:"vhosts"`
 	TracingServiceName string `koanf:"tracing_service_name"`
 
 	// HTTPListener configuration
 	HTTPListener HTTPListenerConfig `koanf:"http_listener"`
 }
 
-// EnvoyUpstreamClusterConfig holds default cluster-level settings for API upstream clusters (e.g. connect timeout).
-type EnvoyUpstreamClusterConfig struct {
-	ConnectTimeoutInMs uint32 `koanf:"connect_timeout_in_ms"`
+// RouterUpstream holds upstream-side configuration (TLS and timeouts for Envoy upstream).
+type RouterUpstream struct {
+	TLS      UpstreamTLS      `koanf:"tls"`
+	Timeouts UpstreamTimeouts `koanf:"timeouts"`
+}
+
+// UpstreamTLS holds TLS configuration for upstream connections.
+type UpstreamTLS struct {
+	MinimumProtocolVersion string `koanf:"minimum_protocol_version"`
+	MaximumProtocolVersion string `koanf:"maximum_protocol_version"`
+	Ciphers                string `koanf:"ciphers"`
+	TrustedCertPath        string `koanf:"trusted_cert_path"`
+	CustomCertsPath        string `koanf:"custom_certs_path"` // Directory containing custom trusted certificates
+	VerifyHostName         bool   `koanf:"verify_host_name"`
+	DisableSslVerification bool   `koanf:"disable_ssl_verification"`
+}
+
+// UpstreamTimeouts holds upstream timeout configurations (values in milliseconds).
+type UpstreamTimeouts struct {
+	RouteTimeoutInMs     uint32 `koanf:"route_timeout_in_ms"`
+	RouteIdleTimeoutInMs uint32 `koanf:"route_idle_timeout_in_ms"`
+	ConnectTimeoutInMs   uint32 `koanf:"connect_timeout_in_ms"`
 }
 
 // RouterLuaConfig holds Lua related configurations.
@@ -260,31 +276,6 @@ type DownstreamTLS struct {
 	Ciphers                string `koanf:"ciphers"`
 }
 
-// envoyDownstream holds downstream-side configurations (TLS and route timeouts)
-type envoyDownstream struct {
-	// TLS holds downstream TLS-related configuration for upstream connections
-	TLS downstreamTLS `koanf:"tls"`
-	// Timeouts holds route timeout configurations (in milliseconds)
-	Timeouts routeTimeout `koanf:"timeouts"`
-}
-
-// downstreamTLS holds TLS configuration for upstream connections
-type downstreamTLS struct {
-	MinimumProtocolVersion string `koanf:"minimum_protocol_version"`
-	MaximumProtocolVersion string `koanf:"maximum_protocol_version"`
-	Ciphers                string `koanf:"ciphers"`
-	TrustedCertPath        string `koanf:"trusted_cert_path"`
-	CustomCertsPath        string `koanf:"custom_certs_path"` // Directory containing custom trusted certificates
-	VerifyHostName         bool   `koanf:"verify_host_name"`
-	DisableSslVerification bool   `koanf:"disable_ssl_verification"`
-}
-
-// routeTimeout holds route-level timeout configurations (values in milliseconds)
-type routeTimeout struct {
-	RouteTimeoutInMs     uint32 `koanf:"route_timeout_in_ms"`
-	MaxRouteTimeoutInMs  uint32 `koanf:"max_route_timeout_in_ms"`
-	RouteIdleTimeoutInMs uint32 `koanf:"route_idle_timeout_in_ms"`
-}
 
 // VHostsConfig for vhosts configuration
 type VHostsConfig struct {
@@ -518,8 +509,8 @@ func defaultConfig() *Config {
 					Ciphers:                "ECDHE-ECDSA-AES128-GCM-SHA256,ECDHE-RSA-AES128-GCM-SHA256,ECDHE-ECDSA-AES128-SHA,ECDHE-RSA-AES128-SHA,AES128-GCM-SHA256,AES128-SHA,ECDHE-ECDSA-AES256-GCM-SHA384,ECDHE-RSA-AES256-GCM-SHA384,ECDHE-ECDSA-AES256-SHA,ECDHE-RSA-AES256-SHA,AES256-GCM-SHA384,AES256-SHA",
 				},
 				GatewayHost: "*",
-				Downstream: envoyDownstream{
-					TLS: downstreamTLS{
+				Upstream: RouterUpstream{
+					TLS: UpstreamTLS{
 						MinimumProtocolVersion: "TLS1_2",
 						MaximumProtocolVersion: "TLS1_3",
 						Ciphers:                "ECDHE-ECDSA-AES128-GCM-SHA256,ECDHE-RSA-AES128-GCM-SHA256,ECDHE-ECDSA-AES128-SHA,ECDHE-RSA-AES128-SHA,AES128-GCM-SHA256,AES128-SHA,ECDHE-ECDSA-AES256-GCM-SHA384,ECDHE-RSA-AES256-GCM-SHA384,ECDHE-ECDSA-AES256-SHA,ECDHE-RSA-AES256-SHA,AES256-GCM-SHA384,AES256-SHA",
@@ -528,14 +519,11 @@ func defaultConfig() *Config {
 						VerifyHostName:         true,
 						DisableSslVerification: false,
 					},
-					Timeouts: routeTimeout{
+					Timeouts: UpstreamTimeouts{
 						RouteTimeoutInMs:     60000,
-						MaxRouteTimeoutInMs:  60000,
 						RouteIdleTimeoutInMs: 300000,
+						ConnectTimeoutInMs:  5000,
 					},
-				},
-				EnvoyUpstreamCluster: EnvoyUpstreamClusterConfig{
-					ConnectTimeoutInMs: 5000,
 				},
 				PolicyEngine: PolicyEngineConfig{
 					Enabled:           true,
@@ -756,11 +744,6 @@ func (c *Config) Validate() error {
 		return err
 	}
 
-	// Validate envoy upstream cluster configuration
-	if err := c.validateEnvoyUpstreamClusterConfig(); err != nil {
-		return err
-	}
-
 	// Validate policy engine configuration
 	if err := c.validatePolicyEngineConfig(); err != nil {
 		return err
@@ -848,7 +831,7 @@ func (c *Config) validateControlPlaneConfig() error {
 	return nil
 }
 
-// validateTLSConfig validates the TLS configuration
+// validateTLSConfig validates the upstream TLS configuration
 func (c *Config) validateTLSConfig() error {
 	// Validate TLS protocol versions
 	validTLSVersions := []string{
@@ -859,9 +842,9 @@ func (c *Config) validateTLSConfig() error {
 	}
 
 	// Validate minimum TLS version
-	minVersion := c.GatewayController.Router.Downstream.TLS.MinimumProtocolVersion
+	minVersion := c.GatewayController.Router.Upstream.TLS.MinimumProtocolVersion
 	if minVersion == "" {
-		return fmt.Errorf("router.envoy_downstream.tls.minimum_protocol_version is required")
+		return fmt.Errorf("router.upstream.tls.minimum_protocol_version is required")
 	}
 
 	isValidMinVersion := false
@@ -872,14 +855,14 @@ func (c *Config) validateTLSConfig() error {
 		}
 	}
 	if !isValidMinVersion {
-		return fmt.Errorf("router.envoy_downstream.tls.minimum_protocol_version must be one of: %s, got: %s",
+		return fmt.Errorf("router.upstream.tls.minimum_protocol_version must be one of: %s, got: %s",
 			strings.Join(validTLSVersions, ", "), minVersion)
 	}
 
 	// Validate maximum TLS version
-	maxVersion := c.GatewayController.Router.Downstream.TLS.MaximumProtocolVersion
+	maxVersion := c.GatewayController.Router.Upstream.TLS.MaximumProtocolVersion
 	if maxVersion == "" {
-		return fmt.Errorf("router.envoy_downstream.tls.maximum_protocol_version is required")
+		return fmt.Errorf("router.upstream.tls.maximum_protocol_version is required")
 	}
 
 	isValidMaxVersion := false
@@ -890,7 +873,7 @@ func (c *Config) validateTLSConfig() error {
 		}
 	}
 	if !isValidMaxVersion {
-		return fmt.Errorf("router.envoy_downstream.tls.maximum_protocol_version must be one of: %s, got: %s",
+		return fmt.Errorf("router.upstream.tls.maximum_protocol_version must be one of: %s, got: %s",
 			strings.Join(validTLSVersions, ", "), maxVersion)
 	}
 
@@ -903,27 +886,27 @@ func (c *Config) validateTLSConfig() error {
 	}
 
 	if tlsVersionOrder[minVersion] > tlsVersionOrder[maxVersion] {
-		return fmt.Errorf("router.envoy_downstream.tls.minimum_protocol_version (%s) cannot be greater than maximum_protocol_version (%s)",
+		return fmt.Errorf("router.upstream.tls.minimum_protocol_version (%s) cannot be greater than maximum_protocol_version (%s)",
 			minVersion, maxVersion)
 	}
 
 	// Validate cipher suites format (basic validation - ensure it's not empty if provided)
-	ciphers := c.GatewayController.Router.Downstream.TLS.Ciphers
+	ciphers := c.GatewayController.Router.Upstream.TLS.Ciphers
 	if ciphers != "" {
 		// Basic validation: ensure ciphers don't contain invalid characters
 		if strings.Contains(ciphers, constants.CipherInvalidChars1) || strings.Contains(ciphers, constants.CipherInvalidChars2) {
-			return fmt.Errorf("router.envoy_downstream.tls.ciphers contains invalid characters (use comma-separated values)")
+			return fmt.Errorf("router.upstream.tls.ciphers contains invalid characters (use comma-separated values)")
 		}
 
 		// Ensure cipher list is not just whitespace
 		if strings.TrimSpace(ciphers) == "" {
-			return fmt.Errorf("router.envoy_downstream.tls.ciphers cannot be empty or whitespace only")
+			return fmt.Errorf("router.upstream.tls.ciphers cannot be empty or whitespace only")
 		}
 	}
 
 	// Validate trusted cert path if SSL verification is enabled
-	if !c.GatewayController.Router.Downstream.TLS.DisableSslVerification && c.GatewayController.Router.Downstream.TLS.TrustedCertPath == "" {
-		return fmt.Errorf("router.envoy_downstream.tls.trusted_cert_path is required when SSL verification is enabled")
+	if !c.GatewayController.Router.Upstream.TLS.DisableSslVerification && c.GatewayController.Router.Upstream.TLS.TrustedCertPath == "" {
+		return fmt.Errorf("router.upstream.tls.trusted_cert_path is required when SSL verification is enabled")
 	}
 
 	// Validate downstream TLS configuration if HTTPS is enabled
@@ -1021,64 +1004,44 @@ func (c *Config) validateDownstreamTLSConfig() error {
 	return nil
 }
 
-// validateTimeoutConfig validates the timeout configuration
+// validateTimeoutConfig validates the upstream timeout configuration
 func (c *Config) validateTimeoutConfig() error {
-	timeouts := c.GatewayController.Router.Downstream.Timeouts
+	timeouts := c.GatewayController.Router.Upstream.Timeouts
 
 	// Validate route timeout
 	if timeouts.RouteTimeoutInMs <= 0 {
-		return fmt.Errorf("router.envoy_downstream.timeouts.route_timeout_in_ms must be positive, got: %d",
+		return fmt.Errorf("router.upstream.timeouts.route_timeout_in_ms must be positive, got: %d",
 			timeouts.RouteTimeoutInMs)
-	}
-
-	// Validate max route timeout
-	if timeouts.MaxRouteTimeoutInMs <= 0 {
-		return fmt.Errorf("router.envoy_downstream.timeouts.max_route_timeout_in_ms must be positive, got: %d",
-			timeouts.MaxRouteTimeoutInMs)
 	}
 
 	// Validate idle timeout
 	if timeouts.RouteIdleTimeoutInMs <= 0 {
-		return fmt.Errorf("router.envoy_downstream.timeouts.route_idle_timeout_in_ms must be positive, got: %d",
+		return fmt.Errorf("router.upstream.timeouts.route_idle_timeout_in_ms must be positive, got: %d",
 			timeouts.RouteIdleTimeoutInMs)
 	}
 
-	// Validate that route timeout is not greater than max route timeout
-	if timeouts.RouteTimeoutInMs > timeouts.MaxRouteTimeoutInMs {
-		return fmt.Errorf("router.envoy_downstream.timeouts.route_timeout_in_ms (%d) cannot be greater than max_route_timeout_in_ms (%d)",
-			timeouts.RouteTimeoutInMs, timeouts.MaxRouteTimeoutInMs)
+	// Validate connect timeout
+	if timeouts.ConnectTimeoutInMs <= 0 {
+		return fmt.Errorf("router.upstream.timeouts.connect_timeout_in_ms must be positive, got: %d",
+			timeouts.ConnectTimeoutInMs)
 	}
 
 	// Validate reasonable timeout ranges (prevent extremely long timeouts)
 	if timeouts.RouteTimeoutInMs > constants.MaxReasonableTimeoutMs {
-		return fmt.Errorf("router.envoy_downstream.timeouts.route_timeout_in_ms (%d) exceeds maximum reasonable timeout of %d ms",
+		return fmt.Errorf("router.upstream.timeouts.route_timeout_in_ms (%d) exceeds maximum reasonable timeout of %d ms",
 			timeouts.RouteTimeoutInMs, constants.MaxReasonableTimeoutMs)
 	}
 
-	if timeouts.MaxRouteTimeoutInMs > constants.MaxReasonableTimeoutMs {
-		return fmt.Errorf("router.envoy_downstream.timeouts.max_route_timeout_in_ms (%d) exceeds maximum reasonable timeout of %d ms",
-			timeouts.MaxRouteTimeoutInMs, constants.MaxReasonableTimeoutMs)
-	}
-
 	if timeouts.RouteIdleTimeoutInMs > constants.MaxReasonableTimeoutMs {
-		return fmt.Errorf("router.envoy_downstream.timeouts.route_idle_timeout_in_ms (%d) exceeds maximum reasonable timeout of %d ms",
+		return fmt.Errorf("router.upstream.timeouts.route_idle_timeout_in_ms (%d) exceeds maximum reasonable timeout of %d ms",
 			timeouts.RouteIdleTimeoutInMs, constants.MaxReasonableTimeoutMs)
 	}
 
-	return nil
-}
+	if timeouts.ConnectTimeoutInMs > constants.MaxReasonableTimeoutMs {
+		return fmt.Errorf("router.upstream.timeouts.connect_timeout_in_ms (%d) exceeds maximum reasonable timeout of %d ms",
+			timeouts.ConnectTimeoutInMs, constants.MaxReasonableTimeoutMs)
+	}
 
-// validateEnvoyUpstreamClusterConfig validates the envoy upstream cluster configuration
-func (c *Config) validateEnvoyUpstreamClusterConfig() error {
-	clusterCfg := c.GatewayController.Router.EnvoyUpstreamCluster
-	if clusterCfg.ConnectTimeoutInMs <= 0 {
-		return fmt.Errorf("router.envoy_upstream.connect_timeout_in_ms must be positive, got: %d",
-			clusterCfg.ConnectTimeoutInMs)
-	}
-	if clusterCfg.ConnectTimeoutInMs > constants.MaxReasonableTimeoutMs {
-		return fmt.Errorf("router.envoy_upstream.connect_timeout_in_ms (%d) exceeds maximum reasonable timeout of %d ms",
-			clusterCfg.ConnectTimeoutInMs, constants.MaxReasonableTimeoutMs)
-	}
 	return nil
 }
 

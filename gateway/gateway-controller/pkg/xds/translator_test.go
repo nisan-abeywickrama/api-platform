@@ -346,8 +346,17 @@ func testRouterConfig() *config.RouterConfig {
 			Main:    config.VHostEntry{Default: "localhost"},
 			Sandbox: config.VHostEntry{Default: "sandbox.localhost"},
 		},
-		EnvoyUpstreamCluster: config.EnvoyUpstreamClusterConfig{
-			ConnectTimeoutInMs: 5000,
+		Upstream: config.RouterUpstream{
+			TLS: config.UpstreamTLS{
+				MinimumProtocolVersion: constants.TLSVersion12,
+				MaximumProtocolVersion: constants.TLSVersion13,
+				DisableSslVerification: true,
+			},
+			Timeouts: config.UpstreamTimeouts{
+				RouteTimeoutInMs:     60000,
+				RouteIdleTimeoutInMs: 300000,
+				ConnectTimeoutInMs:  5000,
+			},
 		},
 		PolicyEngine: config.PolicyEngineConfig{
 			Enabled: false,

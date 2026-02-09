@@ -47,20 +47,17 @@ func validConfig() *Config {
 					Format:     "json",
 					JSONFields: map[string]string{"status": "%RESPONSE_CODE%"},
 				},
-				Downstream: envoyDownstream{
-					TLS: downstreamTLS{
+				Upstream: RouterUpstream{
+					TLS: UpstreamTLS{
 						MinimumProtocolVersion: constants.TLSVersion12,
 						MaximumProtocolVersion: constants.TLSVersion13,
 						DisableSslVerification: true,
 					},
-					Timeouts: routeTimeout{
+					Timeouts: UpstreamTimeouts{
 						RouteTimeoutInMs:     60000,
-						MaxRouteTimeoutInMs:  120000,
 						RouteIdleTimeoutInMs: 30000,
+						ConnectTimeoutInMs:  5000,
 					},
-				},
-				EnvoyUpstreamCluster: EnvoyUpstreamClusterConfig{
-					ConnectTimeoutInMs: 5000,
 				},
 				PolicyEngine: PolicyEngineConfig{
 					Enabled:           false,
@@ -577,8 +574,8 @@ func TestConfig_ValidateTLSConfig(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := validConfig()
-			cfg.GatewayController.Router.Downstream.TLS.MinimumProtocolVersion = tt.minVersion
-			cfg.GatewayController.Router.Downstream.TLS.MaximumProtocolVersion = tt.maxVersion
+			cfg.GatewayController.Router.Upstream.TLS.MinimumProtocolVersion = tt.minVersion
+			cfg.GatewayController.Router.Upstream.TLS.MaximumProtocolVersion = tt.maxVersion
 			err := cfg.Validate()
 			if tt.wantErr {
 				assert.Error(t, err)
@@ -605,7 +602,7 @@ func TestConfig_ValidateTLSCiphers(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := validConfig()
-			cfg.GatewayController.Router.Downstream.TLS.Ciphers = tt.ciphers
+			cfg.GatewayController.Router.Upstream.TLS.Ciphers = tt.ciphers
 			err := cfg.Validate()
 			if tt.wantErr {
 				assert.Error(t, err)
@@ -619,41 +616,42 @@ func TestConfig_ValidateTLSCiphers(t *testing.T) {
 
 func TestConfig_ValidateTLSTrustedCertPath(t *testing.T) {
 	cfg := validConfig()
-	cfg.GatewayController.Router.Downstream.TLS.DisableSslVerification = false
-	cfg.GatewayController.Router.Downstream.TLS.TrustedCertPath = ""
+	cfg.GatewayController.Router.Upstream.TLS.DisableSslVerification = false
+	cfg.GatewayController.Router.Upstream.TLS.TrustedCertPath = ""
 	err := cfg.Validate()
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "trusted_cert_path is required when SSL verification is enabled")
 
 	// With path set
-	cfg.GatewayController.Router.Downstream.TLS.TrustedCertPath = "/path/to/ca.crt"
+	cfg.GatewayController.Router.Upstream.TLS.TrustedCertPath = "/path/to/ca.crt"
 	err = cfg.Validate()
 	assert.NoError(t, err)
 }
 
 func TestConfig_ValidateTimeoutConfig(t *testing.T) {
 	tests := []struct {
-		name         string
-		routeTimeout uint32
-		maxTimeout   uint32
-		idleTimeout  uint32
-		wantErr      bool
-		errContains  string
+		name            string
+		routeTimeout    uint32
+		idleTimeout     uint32
+		connectTimeout  uint32
+		wantErr         bool
+		errContains     string
 	}{
-		{name: "Valid timeouts", routeTimeout: 60000, maxTimeout: 120000, idleTimeout: 30000, wantErr: false},
-		{name: "Zero route timeout", routeTimeout: 0, maxTimeout: 120000, idleTimeout: 30000, wantErr: true, errContains: "route_timeout_in_ms must be positive"},
-		{name: "Zero max timeout", routeTimeout: 60000, maxTimeout: 0, idleTimeout: 30000, wantErr: true, errContains: "max_route_timeout_in_ms must be positive"},
-		{name: "Zero idle timeout", routeTimeout: 60000, maxTimeout: 120000, idleTimeout: 0, wantErr: true, errContains: "route_idle_timeout_in_ms must be positive"},
-		{name: "Route greater than max", routeTimeout: 200000, maxTimeout: 100000, idleTimeout: 30000, wantErr: true, errContains: "cannot be greater than"},
-		{name: "Route exceeds max reasonable", routeTimeout: constants.MaxReasonableTimeoutMs + 1, maxTimeout: constants.MaxReasonableTimeoutMs + 2, idleTimeout: 30000, wantErr: true, errContains: "exceeds maximum reasonable timeout"},
+		{name: "Valid timeouts", routeTimeout: 60000, idleTimeout: 30000, connectTimeout: 5000, wantErr: false},
+		{name: "Zero route timeout", routeTimeout: 0, idleTimeout: 30000, connectTimeout: 5000, wantErr: true, errContains: "route_timeout_in_ms must be positive"},
+		{name: "Zero idle timeout", routeTimeout: 60000, idleTimeout: 0, connectTimeout: 5000, wantErr: true, errContains: "route_idle_timeout_in_ms must be positive"},
+		{name: "Zero connect timeout", routeTimeout: 60000, idleTimeout: 30000, connectTimeout: 0, wantErr: true, errContains: "connect_timeout_in_ms must be positive"},
+		{name: "Route exceeds max reasonable", routeTimeout: constants.MaxReasonableTimeoutMs + 1, idleTimeout: 30000, connectTimeout: 5000, wantErr: true, errContains: "exceeds maximum reasonable timeout"},
+		{name: "Idle exceeds max reasonable", routeTimeout: 60000, idleTimeout: constants.MaxReasonableTimeoutMs + 1, connectTimeout: 5000, wantErr: true, errContains: "route_idle_timeout_in_ms"},
+		{name: "Connect exceeds max reasonable", routeTimeout: 60000, idleTimeout: 30000, connectTimeout: constants.MaxReasonableTimeoutMs + 1, wantErr: true, errContains: "connect_timeout_in_ms"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := validConfig()
-			cfg.GatewayController.Router.Downstream.Timeouts.RouteTimeoutInMs = tt.routeTimeout
-			cfg.GatewayController.Router.Downstream.Timeouts.MaxRouteTimeoutInMs = tt.maxTimeout
-			cfg.GatewayController.Router.Downstream.Timeouts.RouteIdleTimeoutInMs = tt.idleTimeout
+			cfg.GatewayController.Router.Upstream.Timeouts.RouteTimeoutInMs = tt.routeTimeout
+			cfg.GatewayController.Router.Upstream.Timeouts.RouteIdleTimeoutInMs = tt.idleTimeout
+			cfg.GatewayController.Router.Upstream.Timeouts.ConnectTimeoutInMs = tt.connectTimeout
 			err := cfg.Validate()
 			if tt.wantErr {
 				assert.Error(t, err)
@@ -1117,7 +1115,7 @@ func TestDefaultConfig(t *testing.T) {
 	assert.NotNil(t, cfg)
 	assert.Equal(t, "sqlite", cfg.GatewayController.Storage.Type)
 	assert.Equal(t, "info", cfg.GatewayController.Logging.Level)
-	assert.Equal(t, uint32(5000), cfg.GatewayController.Router.EnvoyUpstreamCluster.ConnectTimeoutInMs, "default router.envoy_upstream.connect_timeout_in_ms should be 5s (5000 ms)")
+	assert.Equal(t, uint32(5000), cfg.GatewayController.Router.Upstream.Timeouts.ConnectTimeoutInMs, "default router.upstream.timeouts.connect_timeout_in_ms should be 5s (5000 ms)")
 }
 
 func TestConfig_CaseInsensitiveAlgorithm(t *testing.T) {
