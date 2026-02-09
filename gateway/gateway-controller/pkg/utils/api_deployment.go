@@ -147,13 +147,16 @@ func (s *APIDeploymentService) DeployAPIConfiguration(params APIDeploymentParams
 	handle := apiConfig.Metadata.Name
 
 	// Determine if this is an update or create by checking if config with apiID already exists
-	existingConfig, _ := s.store.Get(apiID)
-	isUpdate := existingConfig != nil
+	var existingConfig *models.StoredConfig
+	var isUpdate bool
 
 	// Check for conflicts with other configurations
 	// For updates: only error if name/version/handle belong to a different config ID
 	// For creates: any conflict is an error
 	if s.store != nil {
+		existingConfig, _ = s.store.Get(apiID)
+		isUpdate = existingConfig != nil
+
 		// Check name+version conflict
 		if conflicting, err := s.store.GetByNameVersion(apiName, apiVersion); err == nil {
 			// For updates: only error if the conflict is with a different API

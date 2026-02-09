@@ -19,6 +19,7 @@
 package storage
 
 import (
+	"context"
 	"database/sql"
 	_ "embed"
 	"encoding/json"
@@ -304,9 +305,31 @@ func (s *SQLiteStorage) initSchema() error {
 			// Rebuild deployments table to update CHECK constraint to include 'undeployed' status
 			s.logger.Info("Migrating schema to version 7 (adding 'undeployed' status to deployments)")
 
+			// Disable foreign keys before migration (PRAGMA cannot be used inside transaction)
+			if _, err := s.db.Exec("PRAGMA foreign_keys = OFF"); err != nil {
+				return fmt.Errorf("failed to disable foreign keys for migration: %w", err)
+			}
+
+			// Begin transaction for atomic migration
+			tx, err := s.db.BeginTx(context.Background(), nil)
+			if err != nil {
+				// Re-enable foreign keys before returning
+				s.db.Exec("PRAGMA foreign_keys = ON")
+				return fmt.Errorf("failed to begin transaction for migration to version 7: %w", err)
+			}
+			defer func() {
+				if err != nil {
+					if rbErr := tx.Rollback(); rbErr != nil {
+						s.logger.Error("Failed to rollback migration transaction", slog.Any("error", rbErr))
+					}
+					// Re-enable foreign keys after rollback
+					s.db.Exec("PRAGMA foreign_keys = ON")
+				}
+			}()
+
 			// SQLite doesn't support ALTER COLUMN, so we need to rebuild the table
 			// 1. Create new table with updated constraint
-			if _, err := s.db.Exec(`CREATE TABLE deployments_new (
+			if _, err = tx.Exec(`CREATE TABLE deployments_new (
 				id TEXT PRIMARY KEY,
 				display_name TEXT NOT NULL,
 				version TEXT NOT NULL,
@@ -324,7 +347,7 @@ func (s *SQLiteStorage) initSchema() error {
 			}
 
 			// 2. Copy data from old table to new table
-			if _, err := s.db.Exec(`
+			if _, err = tx.Exec(`
 				INSERT INTO deployments_new 
 				SELECT id, display_name, version, context, kind, handle, status, 
 				       created_at, updated_at, deployed_at, deployed_version
@@ -334,32 +357,42 @@ func (s *SQLiteStorage) initSchema() error {
 			}
 
 			// 3. Drop old table
-			if _, err := s.db.Exec(`DROP TABLE deployments;`); err != nil {
+			if _, err = tx.Exec(`DROP TABLE deployments;`); err != nil {
 				return fmt.Errorf("failed to drop old deployments table: %w", err)
 			}
 
 			// 4. Rename new table to original name
-			if _, err := s.db.Exec(`ALTER TABLE deployments_new RENAME TO deployments;`); err != nil {
+			if _, err = tx.Exec(`ALTER TABLE deployments_new RENAME TO deployments;`); err != nil {
 				return fmt.Errorf("failed to rename deployments_new to deployments: %w", err)
 			}
 
 			// 5. Recreate indexes
-			if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_name_version ON deployments(display_name, version);`); err != nil {
+			if _, err = tx.Exec(`CREATE INDEX IF NOT EXISTS idx_name_version ON deployments(display_name, version);`); err != nil {
 				return fmt.Errorf("failed to create idx_name_version: %w", err)
 			}
-			if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_status ON deployments(status);`); err != nil {
+			if _, err = tx.Exec(`CREATE INDEX IF NOT EXISTS idx_status ON deployments(status);`); err != nil {
 				return fmt.Errorf("failed to create idx_status: %w", err)
 			}
-			if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_context ON deployments(context);`); err != nil {
+			if _, err = tx.Exec(`CREATE INDEX IF NOT EXISTS idx_context ON deployments(context);`); err != nil {
 				return fmt.Errorf("failed to create idx_context: %w", err)
 			}
-			if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_kind ON deployments(kind);`); err != nil {
+			if _, err = tx.Exec(`CREATE INDEX IF NOT EXISTS idx_kind ON deployments(kind);`); err != nil {
 				return fmt.Errorf("failed to create idx_kind: %w", err)
 			}
 
 			// 6. Update schema version
-			if _, err := s.db.Exec("PRAGMA user_version = 7"); err != nil {
+			if _, err = tx.Exec("PRAGMA user_version = 7"); err != nil {
 				return fmt.Errorf("failed to set schema version to 7: %w", err)
+			}
+
+			// Commit the transaction
+			if err = tx.Commit(); err != nil {
+				return fmt.Errorf("failed to commit migration to version 7: %w", err)
+			}
+
+			// Re-enable foreign keys after successful migration
+			if _, err := s.db.Exec("PRAGMA foreign_keys = ON"); err != nil {
+				return fmt.Errorf("failed to re-enable foreign keys after migration: %w", err)
 			}
 
 			s.logger.Info("Schema migrated to version 7 (deployments status includes 'undeployed')")
