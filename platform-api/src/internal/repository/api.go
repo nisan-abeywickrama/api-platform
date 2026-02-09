@@ -66,8 +66,8 @@ func (r *APIRepo) CreateAPI(api *model.API) error {
 	}
 
 	kind := constants.RestApi
-	if api.Kind == constants.WebSub {
-		kind = constants.WebSub
+	if api.Kind == constants.WebSubApi {
+		kind = constants.WebSubApi
 	}
 
 	if err := r.artifactRepo.Create(tx, &model.Artifact{

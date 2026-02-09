@@ -68,118 +68,80 @@ func setupTestDB(t *testing.T) (*database.DB, func()) {
 	return db, cleanup
 }
 
-// createTestSchema creates the minimal schema required for deployment tests
+// createTestSchema creates the database schema by executing schema.sqlite.sql
 func createTestSchema(db *database.DB) error {
-	schema := `
-		-- Artifacts table
-		CREATE TABLE IF NOT EXISTS artifacts (
-			uuid TEXT PRIMARY KEY,
-			handle TEXT NOT NULL,
-			name TEXT NOT NULL,
-			kind VARCHAR(20) NOT NULL DEFAULT 'RestApi',
-			organization_uuid TEXT NOT NULL,
-			project_uuid TEXT NOT NULL,
-			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-		);
+	schemaPath := filepath.Join("..", "database", "schema.sqlite.sql")
+	schema, err := os.ReadFile(schemaPath)
+	if err != nil {
+		return fmt.Errorf("failed to read schema file: %w", err)
+	}
 
-		-- APIs table
-		CREATE TABLE IF NOT EXISTS apis (
-			uuid TEXT PRIMARY KEY,
-			handle TEXT NOT NULL,
-			name TEXT NOT NULL,
-			description TEXT,
-			context TEXT NOT NULL,
-			version TEXT NOT NULL,
-			provider TEXT,
-			project_uuid TEXT,
-			organization_uuid TEXT NOT NULL,
-			lifecycle_status TEXT DEFAULT 'CREATED',
-			type TEXT DEFAULT 'REST',
-			transport TEXT,
-			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-			FOREIGN KEY (uuid) REFERENCES artifacts(uuid) ON DELETE CASCADE
-		);
+	_, err = db.Exec(string(schema))
+	if err != nil {
+		return fmt.Errorf("failed to execute schema: %w", err)
+	}
 
-		-- Gateways table
-		CREATE TABLE IF NOT EXISTS gateways (
-			uuid TEXT PRIMARY KEY,
-			name TEXT NOT NULL,
-			display_name TEXT NOT NULL,
-			description TEXT,
-			vhost TEXT NOT NULL,
-			organization_uuid TEXT NOT NULL,
-			is_critical BOOLEAN DEFAULT FALSE,
-			gateway_functionality_type TEXT DEFAULT 'general',
-			is_active BOOLEAN DEFAULT TRUE,
-			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-		);
-
-		-- Artifact deployments table (artifact storage)
-		CREATE TABLE IF NOT EXISTS deployments (
-			deployment_id TEXT PRIMARY KEY,
-			name TEXT NOT NULL,
-			artifact_uuid TEXT NOT NULL,
-			organization_uuid TEXT NOT NULL,
-			gateway_uuid TEXT NOT NULL,
-			base_deployment_id TEXT,
-			content BLOB NOT NULL,
-			metadata TEXT,
-			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-			FOREIGN KEY (artifact_uuid) REFERENCES artifacts(uuid) ON DELETE CASCADE
-		);
-
-		-- Deployment status table (lifecycle state)
-		CREATE TABLE IF NOT EXISTS deployment_status (
-			artifact_uuid TEXT NOT NULL,
-			organization_uuid TEXT NOT NULL,
-			gateway_uuid TEXT NOT NULL,
-			deployment_id TEXT NOT NULL,
-			status TEXT NOT NULL CHECK(status IN ('DEPLOYED', 'UNDEPLOYED')),
-			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-			PRIMARY KEY (artifact_uuid, organization_uuid, gateway_uuid),
-			FOREIGN KEY (deployment_id) REFERENCES deployments(deployment_id) ON DELETE CASCADE
-		);
-	`
-
-	_, err := db.Exec(schema)
-	return err
+	return nil
 }
 
-// createTestAPI creates a test API in the database
+// createTestAPI creates a test API in the database with specific UUIDs
 func createTestAPI(t *testing.T, db *database.DB, apiUUID, orgUUID string) {
 	t.Helper()
 
-	artifactQuery := `
-		INSERT INTO artifacts (uuid, handle, name, kind, organization_uuid, project_uuid)
-		VALUES (?, ?, ?, ?, ?, ?)
+	// Create organization directly
+	orgQuery := `
+		INSERT INTO organizations (uuid, handle, name, region, created_at, updated_at)
+		VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))
 	`
-	_, err := db.Exec(artifactQuery, apiUUID, "test-api", "Test API", "api", orgUUID, "project-001")
+	_, err := db.Exec(orgQuery, orgUUID, "test-org-"+orgUUID, "Test Org", "default")
+	if err != nil {
+		t.Fatalf("Failed to create test organization: %v", err)
+	}
+
+	// Create project directly
+	projectQuery := `
+		INSERT INTO projects (uuid, name, organization_uuid, created_at, updated_at)
+		VALUES (?, ?, ?, datetime('now'), datetime('now'))
+	`
+	_, err = db.Exec(projectQuery, "project-001", "Test Project", orgUUID)
+	if err != nil {
+		t.Fatalf("Failed to create test project: %v", err)
+	}
+
+	// Create artifact directly
+	artifactQuery := `
+		INSERT INTO artifacts (uuid, handle, name, version, kind, organization_uuid, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+	`
+	_, err = db.Exec(artifactQuery, apiUUID, "test-api", "Test API", "1.0.0", "RestApi", orgUUID)
 	if err != nil {
 		t.Fatalf("Failed to create test artifact: %v", err)
 	}
 
-	query := `
-		INSERT INTO apis (uuid, handle, name, context, version, organization_uuid)
-		VALUES (?, ?, ?, ?, ?, ?)
+	// Create API directly
+	apiQuery := `
+		INSERT INTO apis (uuid, description, created_by, project_uuid, lifecycle_status, transport, configuration)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
 	`
-	_, err = db.Exec(query, apiUUID, "test-api", "Test API", "/test", "v1", orgUUID)
+	transportJSON := `["https"]`
+	_, err = db.Exec(apiQuery, apiUUID, "Test API Description", "test-user", "project-001", "CREATED", transportJSON, "{}")
 	if err != nil {
 		t.Fatalf("Failed to create test API: %v", err)
 	}
 }
 
-// createTestGateway creates a test gateway in the database
+// createTestGateway creates a test gateway in the database with specific UUID
 func createTestGateway(t *testing.T, db *database.DB, gatewayUUID, orgUUID string) {
 	t.Helper()
 
+	// Create gateway directly (organization should already exist from createTestAPI)
 	query := `
-		INSERT INTO gateways (uuid, name, display_name, vhost, organization_uuid)
-		VALUES (?, ?, ?, ?, ?)
+		INSERT INTO gateways (uuid, organization_uuid, name, display_name, description, properties, vhost,
+			is_critical, gateway_functionality_type, is_active, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
 	`
-	_, err := db.Exec(query, gatewayUUID, "test-gateway", "Test Gateway", "api.example.com", orgUUID)
+	_, err := db.Exec(query, gatewayUUID, orgUUID, "test-gateway-"+gatewayUUID, "Test Gateway",
+		"", "{}", "api.example.com", false, "regular", false)
 	if err != nil {
 		t.Fatalf("Failed to create test gateway: %v", err)
 	}

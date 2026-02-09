@@ -242,7 +242,6 @@ CREATE TABLE IF NOT EXISTS llm_proxies (
 -- Indexes for better performance
 CREATE INDEX IF NOT EXISTS idx_projects_organization_id ON projects(organization_uuid);
 CREATE INDEX IF NOT EXISTS idx_apis_project_id ON apis(project_uuid);
-CREATE INDEX IF NOT EXISTS idx_apis_name_context_version ON apis(name, context, version);
 CREATE INDEX IF NOT EXISTS idx_gateways_org ON gateways(organization_uuid);
 CREATE INDEX IF NOT EXISTS idx_gateway_tokens_status ON gateway_tokens(gateway_uuid, status);
 CREATE INDEX IF NOT EXISTS idx_artifact_deployments_artifact_gateway ON deployments(artifact_uuid, gateway_uuid);

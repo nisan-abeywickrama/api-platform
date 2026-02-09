@@ -431,7 +431,7 @@ func (u *APIUtil) GenerateAPIDeploymentYAML(api *model.API) (string, error) {
 	case constants.RestApi:
 		apiYAMLData.Upstream = upstreamYAML
 		apiYAMLData.Operations = operationList
-	case constants.WebSub:
+	case constants.WebSubApi:
 		apiYAMLData.Channels = channelList
 	}
 
@@ -439,8 +439,8 @@ func (u *APIUtil) GenerateAPIDeploymentYAML(api *model.API) (string, error) {
 	switch api.Kind {
 	case constants.RestApi:
 		apiType = constants.RestApi
-	case constants.WebSub:
-		apiType = constants.WebSub
+	case constants.WebSubApi:
+		apiType = constants.WebSubApi
 	}
 
 	apiDeployment := dto.APIDeploymentYAML{

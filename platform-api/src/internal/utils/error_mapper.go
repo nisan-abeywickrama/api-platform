@@ -220,6 +220,14 @@ func GetErrorResponse(err error) (int, interface{}) {
 	case errors.Is(err, constants.ErrInvalidDeployment):
 		return makeError(http.StatusBadRequest, "Invalid API deployment")
 
+	// Artifact errors
+	case errors.Is(err, constants.ErrArtifactNotFound):
+		return makeError(http.StatusNotFound, "Artifact not found")
+	case errors.Is(err, constants.ErrArtifactExists):
+		return makeError(http.StatusConflict, "Artifact already exists")
+	case errors.Is(err, constants.ErrArtifactInvalidKind):
+		return makeError(http.StatusBadRequest, "Invalid artifact kind")
+
 	// Gateway errors
 	case errors.Is(err, constants.ErrGatewayNotFound):
 		return makeError(http.StatusNotFound, "Gateway not found")
