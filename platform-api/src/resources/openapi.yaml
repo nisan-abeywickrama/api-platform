@@ -4548,7 +4548,10 @@ components:
             paths: {}
         modelProviders:
           type: array
-          description: List of model providers and their models supported by this provider. For non-aggregator templates, only a single model provider is allowed (aggregator templates: awsbedrock, azureaifoundry).
+          description: >
+            List of model providers and their models supported by this provider. For non-aggregator
+            templates, only a single model provider is allowed (aggregator templates: awsbedrock,
+            azureaifoundry).
           items:
             $ref: '#/components/schemas/LLMModelProvider'
         upstream:
@@ -4816,41 +4819,7 @@ components:
             $ref: '#/components/schemas/LLMProxyListItem'
         pagination:
           $ref: '#/components/schemas/Pagination'
-
-    SecurityConfig:
-      title: Security Configuration
-      description: Defines security mechanisms (API key) applicable to the API
-      type: object
-      properties:
-        enabled:
-          type: boolean
-          description: Whether security is enabled
-          example: true
-        apiKey:
-          $ref: '#/components/schemas/APIKeySecurity'
-
-    APIKeySecurity:
-      title: API Key Security
-      description: Configuration for API key–based authentication
-      type: object
-      properties:
-        enabled:
-          type: boolean
-          description: Whether API key authentication is enabled
-          example: true
-        header:
-          type: string
-          description: Header name to carry the API key
-          example: "api-key"
-        query:
-          type: string
-          description: Query parameter name to carry the API key
-          example: "api-key"
-        cookie:
-          type: string
-          description: Cookie name to carry the API key
-          example: "api-key"
-
+          
   responses:
     Unauthorized:
       description: Unauthorized. Authentication credentials are missing or invalid.
