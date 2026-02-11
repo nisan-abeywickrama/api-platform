@@ -17,6 +17,12 @@
 
 package dto
 
+// ExpirationDuration represents a time duration for API key expiration
+type ExpirationDuration struct {
+	Duration int    `json:"duration" yaml:"duration"`
+	Unit     string `json:"unit" yaml:"unit"`
+}
+
 // CreateAPIKeyRequest represents the request to register an external API key.
 // This is used when external platforms inject API keys to hybrid gateways.
 type CreateAPIKeyRequest struct {
@@ -54,11 +60,26 @@ type CreateAPIKeyResponse struct {
 // UpdateAPIKeyRequest represents the request to update/regenerate an API key.
 // This is used when external platforms rotate API keys on hybrid gateways.
 type UpdateAPIKeyRequest struct {
+	// Name is the unique identifier for this API key within the API (optional; if omitted, generated from displayName)
+	Name string `json:"name,omitempty"`
+
+	// DisplayName is the display name of the API key
+	DisplayName string `json:"displayName,omitempty"`
+
 	// ApiKey is the new plain text API key value that will be hashed before storage
 	ApiKey string `json:"apiKey" binding:"required"`
 
+	// ExternalRefId is an optional reference ID for tracing purposes (from external platforms)
+	ExternalRefId *string `json:"externalRefId,omitempty"`
+
+	// Operations specifies which API operations this key can access (default: "*" for all)
+	Operations string `json:"operations,omitempty"`
+
 	// ExpiresAt is the optional expiration time in ISO 8601 format
 	ExpiresAt *string `json:"expiresAt,omitempty"`
+
+	// ExpiresIn is the optional expiration duration
+	ExpiresIn *ExpirationDuration `json:"expiresIn,omitempty"`
 }
 
 // UpdateAPIKeyResponse represents the response after updating an API key.
