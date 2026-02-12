@@ -31,7 +31,7 @@ curl http://localhost:8080/pets?id=1
 
 | Flag | Default | Description |
 |---|---|---|
-| `-port` | `8080` | Server listen port |
+| `-addr` | `:8080` | Server listen address |
 | `-pretty` | `false` | Pretty print JSON responses |
 
 ## Build
@@ -46,7 +46,7 @@ make build
 make run
 
 # With flags
-make run ARGS="-pretty -port 8080"
+make run ARGS="-pretty -addr :9080"
 ```
 
 ## Test

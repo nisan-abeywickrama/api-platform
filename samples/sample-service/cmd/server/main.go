@@ -18,7 +18,6 @@ package main
 
 import (
 	"flag"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -30,7 +29,7 @@ import (
 var version = "dev"
 
 func main() {
-	port := flag.Int("port", 8080, "server listen port")
+	addr := flag.String("addr", ":8080", "server listen address")
 	pretty := flag.Bool("pretty", false, "pretty print JSON responses")
 	flag.Parse()
 
@@ -41,11 +40,10 @@ func main() {
 	mux := http.NewServeMux()
 	h.RegisterRoutes(mux)
 
-	addr := fmt.Sprintf(":%d", *port)
-	slog.Info("starting sample-service", "version", version, "port", *port, "pretty", *pretty)
+	slog.Info("starting sample-service", "version", version, "addr", *addr, "pretty", *pretty)
 
 	server := &http.Server{
-		Addr:         addr,
+		Addr:         *addr,
 		Handler:      mux,
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 10 * time.Second,

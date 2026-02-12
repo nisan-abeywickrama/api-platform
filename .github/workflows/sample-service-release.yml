@@ -41,7 +41,7 @@ jobs:
           driver: docker-container
 
       - name: Run tests
-        run: make test-integration
+        run: make test
         working-directory: samples/sample-service
 
       - name: Login to GitHub Container Registry

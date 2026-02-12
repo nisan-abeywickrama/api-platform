@@ -28,10 +28,10 @@ help: ## Show this help message
 
 .PHONY: build
 build: ## Build Docker image
-	docker build -t $(IMAGE_NAME):$(VERSION) --build-arg VERSION=$(VERSION) .
+	docker build -t $(IMAGE_NAME):$(VERSION) -t $(IMAGE_NAME):latest --build-arg VERSION=$(VERSION) .
 
 .PHONY: run
-run: build ## Build and run Docker container (use ARGS to pass flags, e.g. make run ARGS="-pretty -port 9080")
+run: build ## Build and run Docker container (use ARGS to pass flags, e.g. make run ARGS="-pretty -addr :9080")
 	docker run --rm -p 8080:8080 $(IMAGE_NAME):$(VERSION) $(ARGS)
 
 .PHONY: release
@@ -43,12 +43,16 @@ release: ## Build and push multi-arch Docker image (amd64, arm64)
 		--push .
 
 .PHONY: test
-test: ## Run unit tests
+test: ## Run all tests (unit + integration)
+	go test -v -tags=integration ./... -cover
+
+.PHONY: test-unit
+test-unit: ## Run unit tests only
 	go test -v ./... -cover
 
 .PHONY: test-integration
-test-integration: ## Run all tests including integration
-	go test -v -tags=integration ./... -cover
+test-integration: ## Run integration tests only
+	go test -v -tags=integration ./test/... -cover
 
 .PHONY: version
 version: ## Show current version

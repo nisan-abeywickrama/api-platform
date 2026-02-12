@@ -26,5 +26,5 @@ jobs:
         working-directory: samples/sample-service
 
       - name: Run tests
-        run: make test-integration
+        run: make test
         working-directory: samples/sample-service
