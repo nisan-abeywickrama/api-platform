@@ -54,13 +54,13 @@ func TestDumpConfig_WithPolicies(t *testing.T) {
 	k := kernel.NewKernel()
 	reg := &registry.PolicyRegistry{
 		Policies: map[string]*registry.PolicyEntry{
-			"test-policy:v1.0.0": {
+			"test-policy:v1": {
 				Definition: &policy.PolicyDefinition{
 					Name:    "test-policy",
 					Version: "v1.0.0",
 				},
 			},
-			"another-policy:v2.0.0": {
+			"another-policy:v2": {
 				Definition: &policy.PolicyDefinition{
 					Name:    "another-policy",
 					Version: "v2.0.0",
@@ -125,13 +125,13 @@ func TestDumpPolicyRegistry_Empty(t *testing.T) {
 func TestDumpPolicyRegistry_Multiple(t *testing.T) {
 	reg := &registry.PolicyRegistry{
 		Policies: map[string]*registry.PolicyEntry{
-			"auth-policy:v1.0.0": {
+			"auth-policy:v1": {
 				Definition: &policy.PolicyDefinition{
 					Name:    "auth-policy",
 					Version: "v1.0.0",
 				},
 			},
-			"rate-limit:v2.0.0": {
+			"rate-limit:v2": {
 				Definition: &policy.PolicyDefinition{
 					Name:    "rate-limit",
 					Version: "v2.0.0",
