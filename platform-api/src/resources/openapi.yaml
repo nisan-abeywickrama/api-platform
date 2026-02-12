@@ -645,7 +645,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ErrorResponse'
+                $ref: '#/components/schemas/Error'
         '500':
           $ref: '#/components/responses/InternalServerError'
 
@@ -694,7 +694,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ErrorResponse'
+                $ref: '#/components/schemas/Error'
         '500':
           $ref: '#/components/responses/InternalServerError'
 
@@ -731,7 +731,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ErrorResponse'
+                $ref: '#/components/schemas/Error'
         '500':
           $ref: '#/components/responses/InternalServerError'
 
@@ -3674,7 +3674,7 @@ components:
         apiKey:
           type: string
           description: The plain text API key value that will be hashed before storage
-          example: "sk_live_1234567890abcdef"
+          example: "sk_example_1234567890abcdef"
         externalRefId:
           type: string
           description: Optional reference ID for tracing purposes (from external platforms)
@@ -3725,7 +3725,7 @@ components:
         apiKey:
           type: string
           description: The new plain text API key value that will be hashed before storage
-          example: "sk_live_new1234567890abcdef"
+          example: "sk_example_new1234567890abcdef"
         externalRefId:
           type: string
           description: Optional reference ID for tracing purposes (from external platforms)
