@@ -9,31 +9,31 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
-	api "github.com/wso2/api-platform/gateway/gateway-controller/pkg/api/generated"
+	adminapi "github.com/wso2/api-platform/gateway/gateway-controller/pkg/adminapi/generated"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/config"
 )
 
 type stubAPIServer struct {
-	configDump  api.ConfigDumpResponse
+	configDump  adminapi.ConfigDumpResponse
 	configErr   error
-	xdsResponse api.XDSSyncStatusResponse
+	xdsResponse adminapi.XDSSyncStatusResponse
 }
 
-func (s *stubAPIServer) BuildConfigDumpResponse(_ *slog.Logger) (*api.ConfigDumpResponse, error) {
+func (s *stubAPIServer) BuildConfigDumpResponse(_ *slog.Logger) (*adminapi.ConfigDumpResponse, error) {
 	if s.configErr != nil {
 		return nil, s.configErr
 	}
 	return &s.configDump, nil
 }
 
-func (s *stubAPIServer) GetXDSSyncStatusResponse() api.XDSSyncStatusResponse {
+func (s *stubAPIServer) GetXDSSyncStatusResponse() adminapi.XDSSyncStatusResponse {
 	return s.xdsResponse
 }
 
 func TestAdminServer_ConfigDumpHandler(t *testing.T) {
 	status := "ok"
 	stub := &stubAPIServer{
-		configDump: api.ConfigDumpResponse{Status: &status},
+		configDump: adminapi.ConfigDumpResponse{Status: &status},
 	}
 	s := NewServer(&config.AdminServerConfig{Port: 9092, AllowedIPs: []string{"*"}}, stub, slog.Default())
 
@@ -44,7 +44,7 @@ func TestAdminServer_ConfigDumpHandler(t *testing.T) {
 	s.httpSrv.Handler.ServeHTTP(rr, req)
 	assert.Equal(t, http.StatusOK, rr.Code)
 
-	var body api.ConfigDumpResponse
+	var body adminapi.ConfigDumpResponse
 	assert.NoError(t, json.NewDecoder(rr.Body).Decode(&body))
 	assert.NotNil(t, body.Status)
 	assert.Equal(t, "ok", *body.Status)
@@ -55,7 +55,7 @@ func TestAdminServer_XDSSyncStatusHandler(t *testing.T) {
 	version := "12"
 	now := time.Now()
 	stub := &stubAPIServer{
-		xdsResponse: api.XDSSyncStatusResponse{
+		xdsResponse: adminapi.XDSSyncStatusResponse{
 			Component:          &component,
 			PolicyChainVersion: &version,
 			Timestamp:          &now,
@@ -70,7 +70,7 @@ func TestAdminServer_XDSSyncStatusHandler(t *testing.T) {
 	s.httpSrv.Handler.ServeHTTP(rr, req)
 	assert.Equal(t, http.StatusOK, rr.Code)
 
-	var body api.XDSSyncStatusResponse
+	var body adminapi.XDSSyncStatusResponse
 	assert.NoError(t, json.NewDecoder(rr.Body).Decode(&body))
 	assert.NotNil(t, body.PolicyChainVersion)
 	assert.Equal(t, "12", *body.PolicyChainVersion)

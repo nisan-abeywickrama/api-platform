@@ -36,6 +36,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/wso2/api-platform/common/constants"
 	commonmodels "github.com/wso2/api-platform/common/models"
+	adminapi "github.com/wso2/api-platform/gateway/gateway-controller/pkg/adminapi/generated"
 	api "github.com/wso2/api-platform/gateway/gateway-controller/pkg/api/generated"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/config"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/models"
@@ -790,7 +791,7 @@ func TestGetConfigDump(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, w.Code)
 
-	var response api.ConfigDumpResponse
+	var response adminapi.ConfigDumpResponse
 	err := json.Unmarshal(w.Body.Bytes(), &response)
 	require.NoError(t, err)
 	assert.Equal(t, "success", *response.Status)
@@ -807,7 +808,7 @@ func TestGetXDSSyncStatus(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, w.Code)
 
-	var response api.XDSSyncStatusResponse
+	var response adminapi.XDSSyncStatusResponse
 	err := json.Unmarshal(w.Body.Bytes(), &response)
 	require.NoError(t, err)
 	assert.Equal(t, "gateway-controller", *response.Component)
@@ -830,7 +831,7 @@ func TestGetXDSSyncStatusWithPolicyVersion(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, w.Code)
 
-	var response api.XDSSyncStatusResponse
+	var response adminapi.XDSSyncStatusResponse
 	err := json.Unmarshal(w.Body.Bytes(), &response)
 	require.NoError(t, err)
 	assert.Equal(t, "2", *response.PolicyChainVersion)
@@ -1640,13 +1641,12 @@ func TestConfigDumpAPIStatusConversion(t *testing.T) {
 	server := createTestAPIServer()
 
 	testCases := []struct {
-		name           string
-		status         models.ConfigStatus
-		expectedStatus api.ConfigDumpAPIMetadataStatus
+		name   string
+		status models.ConfigStatus
 	}{
-		{"deployed", models.StatusDeployed, api.ConfigDumpAPIMetadataStatusDeployed},
-		{"failed", models.StatusFailed, api.ConfigDumpAPIMetadataStatusFailed},
-		{"pending", models.StatusPending, api.ConfigDumpAPIMetadataStatusPending},
+		{"deployed", models.StatusDeployed},
+		{"failed", models.StatusFailed},
+		{"pending", models.StatusPending},
 	}
 
 	for _, tc := range testCases {

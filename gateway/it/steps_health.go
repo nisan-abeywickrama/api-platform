@@ -201,12 +201,21 @@ func (h *HealthSteps) waitForPolicySnapshotSync() error {
 
 	controllerURL := fmt.Sprintf("%s/xds_sync_status", h.state.Config.GatewayControllerAdminURL)
 	policyEngineURL := fmt.Sprintf("%s/xds_sync_status", h.state.Config.PolicyEngineURL)
+	lastControllerVersion := ""
+	lastRuntimeVersion := ""
+	var lastControllerErr error
+	var lastRuntimeErr error
 
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		controllerVersion, controllerErr := h.getControllerPolicyVersion(controllerURL)
 		runtimeVersion, runtimeErr := h.getPolicyEnginePolicyVersion(policyEngineURL)
+		lastControllerVersion = controllerVersion
+		lastRuntimeVersion = runtimeVersion
+		lastControllerErr = controllerErr
+		lastRuntimeErr = runtimeErr
 
-		if controllerErr == nil && runtimeErr == nil && controllerVersion == runtimeVersion {
+		if controllerErr == nil && runtimeErr == nil &&
+			controllerVersion == runtimeVersion && controllerVersion != "" {
 			return nil
 		}
 
@@ -215,7 +224,8 @@ func (h *HealthSteps) waitForPolicySnapshotSync() error {
 		}
 	}
 
-	return fmt.Errorf("policy snapshot versions did not sync in time between controller and policy engine")
+	return fmt.Errorf("policy snapshot versions did not sync in time between controller and policy engine: controller_version=%q runtime_version=%q controller_err=%v runtime_err=%v",
+		lastControllerVersion, lastRuntimeVersion, lastControllerErr, lastRuntimeErr)
 }
 
 func (h *HealthSteps) getControllerPolicyVersion(url string) (string, error) {

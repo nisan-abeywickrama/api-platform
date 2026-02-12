@@ -2072,19 +2072,6 @@ func TestServerInterfaceWrapper_MiscRoutes(t *testing.T) {
 		assert.True(t, mockServer.HealthCheckCalled)
 	})
 
-	t.Run("GetConfigDump", func(t *testing.T) {
-		router := gin.New()
-		mockServer := &MockServerInterface{}
-		RegisterHandlers(router, mockServer)
-
-		w := httptest.NewRecorder()
-		req, _ := http.NewRequest("GET", "/config_dump", nil)
-		router.ServeHTTP(w, req)
-
-		assert.Equal(t, http.StatusOK, w.Code)
-		assert.True(t, mockServer.GetConfigDumpCalled)
-	})
-
 	t.Run("ListPolicies", func(t *testing.T) {
 		router := gin.New()
 		mockServer := &MockServerInterface{}
@@ -2098,17 +2085,20 @@ func TestServerInterfaceWrapper_MiscRoutes(t *testing.T) {
 		assert.True(t, mockServer.ListPoliciesCalled)
 	})
 
-	t.Run("GetXDSSyncStatus", func(t *testing.T) {
+	t.Run("AdminRoutesNotRegisteredOnMainServer", func(t *testing.T) {
 		router := gin.New()
 		mockServer := &MockServerInterface{}
 		RegisterHandlers(router, mockServer)
 
 		w := httptest.NewRecorder()
-		req, _ := http.NewRequest("GET", "/xds_sync_status", nil)
+		req, _ := http.NewRequest("GET", "/config_dump", nil)
 		router.ServeHTTP(w, req)
+		assert.Equal(t, http.StatusNotFound, w.Code)
 
-		assert.Equal(t, http.StatusOK, w.Code)
-		assert.True(t, mockServer.GetXDSSyncStatusCalled)
+		w = httptest.NewRecorder()
+		req, _ = http.NewRequest("GET", "/xds_sync_status", nil)
+		router.ServeHTTP(w, req)
+		assert.Equal(t, http.StatusNotFound, w.Code)
 	})
 }
 

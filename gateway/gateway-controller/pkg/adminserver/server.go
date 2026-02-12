@@ -8,13 +8,13 @@ import (
 	"net"
 	"net/http"
 
-	api "github.com/wso2/api-platform/gateway/gateway-controller/pkg/api/generated"
+	adminapi "github.com/wso2/api-platform/gateway/gateway-controller/pkg/adminapi/generated"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/config"
 )
 
 type apiServer interface {
-	BuildConfigDumpResponse(log *slog.Logger) (*api.ConfigDumpResponse, error)
-	GetXDSSyncStatusResponse() api.XDSSyncStatusResponse
+	BuildConfigDumpResponse(log *slog.Logger) (*adminapi.ConfigDumpResponse, error)
+	GetXDSSyncStatusResponse() adminapi.XDSSyncStatusResponse
 }
 
 // Server is the controller admin HTTP server for debug endpoints.

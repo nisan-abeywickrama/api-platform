@@ -331,18 +331,6 @@ func main() {
 	router.Use(middleware.CorrelationIDMiddleware(log))
 	router.Use(middleware.ErrorHandlingMiddleware(log))
 	router.Use(middleware.LoggingMiddleware(log))
-	router.Use(func(c *gin.Context) {
-		// Serve debug admin endpoints on the dedicated admin server only.
-		if c.Request.URL.Path == "/config_dump" || c.Request.URL.Path == "/xds_sync_status" {
-			c.JSON(http.StatusNotFound, api.ErrorResponse{
-				Status:  "error",
-				Message: "Not found",
-			})
-			c.Abort()
-			return
-		}
-		c.Next()
-	})
 	// Add metrics middleware if metrics are enabled
 	if cfg.GatewayController.Metrics.Enabled {
 		router.Use(middleware.MetricsMiddleware())

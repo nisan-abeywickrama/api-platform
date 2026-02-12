@@ -40,6 +40,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	commonmodels "github.com/wso2/api-platform/common/models"
+	adminapi "github.com/wso2/api-platform/gateway/gateway-controller/pkg/adminapi/generated"
 	api "github.com/wso2/api-platform/gateway/gateway-controller/pkg/api/generated"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/api/middleware"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/config"
@@ -187,12 +188,12 @@ func (s *APIServer) GetXDSSyncStatus(c *gin.Context) {
 }
 
 // GetXDSSyncStatusResponse builds the xDS sync status response payload.
-func (s *APIServer) GetXDSSyncStatusResponse() api.XDSSyncStatusResponse {
+func (s *APIServer) GetXDSSyncStatusResponse() adminapi.XDSSyncStatusResponse {
 	timestamp := time.Now()
 	component := "gateway-controller"
 	policyChainVersion := s.getPolicyChainVersionString()
 
-	return api.XDSSyncStatusResponse{
+	return adminapi.XDSSyncStatusResponse{
 		Component:          &component,
 		Timestamp:          &timestamp,
 		PolicyChainVersion: &policyChainVersion,
@@ -2171,14 +2172,14 @@ func (s *APIServer) GetConfigDump(c *gin.Context) {
 }
 
 // BuildConfigDumpResponse builds the complete configuration dump response payload.
-func (s *APIServer) BuildConfigDumpResponse(log *slog.Logger) (*api.ConfigDumpResponse, error) {
+func (s *APIServer) BuildConfigDumpResponse(log *slog.Logger) (*adminapi.ConfigDumpResponse, error) {
 	log.Info("Retrieving configuration dump")
 
 	// Get all APIs
 	allConfigs := s.store.GetAll()
 
 	// Build API list with metadata using the generated types
-	apisSlice := make([]api.ConfigDumpAPIItem, 0, len(allConfigs))
+	apisSlice := make([]adminapi.ConfigDumpAPIItem, 0, len(allConfigs))
 
 	for _, cfg := range allConfigs {
 		// Use handle (metadata.name) as the id in the dump
@@ -2189,24 +2190,29 @@ func (s *APIServer) BuildConfigDumpResponse(log *slog.Logger) (*api.ConfigDumpRe
 		}
 
 		// Convert status to the correct type
-		var status api.ConfigDumpAPIMetadataStatus
+		var status adminapi.ConfigDumpAPIMetadataStatus
 		switch cfg.Status {
 		case models.StatusDeployed:
-			status = api.ConfigDumpAPIMetadataStatusDeployed
+			status = adminapi.Deployed
 		case models.StatusFailed:
-			status = api.ConfigDumpAPIMetadataStatusFailed
+			status = adminapi.Failed
 		case models.StatusPending:
-			status = api.ConfigDumpAPIMetadataStatusPending
+			status = adminapi.Pending
 		case models.StatusUndeployed:
-			status = api.ConfigDumpAPIMetadataStatusUndeployed
+			status = adminapi.Undeployed
 		default:
-			status = api.ConfigDumpAPIMetadataStatusPending
+			status = adminapi.Pending
 		}
 
-		item := api.ConfigDumpAPIItem{
-			Configuration: &cfg.Configuration,
+		configuration, err := toGenericMap(cfg.Configuration)
+		if err != nil {
+			return nil, fmt.Errorf("failed to convert API configuration: %w", err)
+		}
+
+		item := adminapi.ConfigDumpAPIItem{
+			Configuration: &configuration,
 			Id:            convertHandleToUUID(configHandle),
-			Metadata: &api.ConfigDumpAPIMetadata{
+			Metadata: &adminapi.ConfigDumpAPIMetadata{
 				CreatedAt:  &cfg.CreatedAt,
 				UpdatedAt:  &cfg.UpdatedAt,
 				DeployedAt: cfg.DeployedAt,
@@ -2218,22 +2224,31 @@ func (s *APIServer) BuildConfigDumpResponse(log *slog.Logger) (*api.ConfigDumpRe
 
 	// Get all policies (excluding system policies)
 	s.policyDefMu.RLock()
-	policies := make([]api.PolicyDefinition, 0, len(s.policyDefinitions))
+	policies := make([]map[string]interface{}, 0, len(s.policyDefinitions))
 	for _, policy := range s.policyDefinitions {
-		policies = append(policies, policy)
+		policyMap, err := toGenericMap(policy)
+		if err != nil {
+			s.policyDefMu.RUnlock()
+			return nil, fmt.Errorf("failed to convert policy definition: %w", err)
+		}
+		policies = append(policies, policyMap)
 	}
 	s.policyDefMu.RUnlock()
 
 	// Sort policies for consistent output
 	sort.Slice(policies, func(i, j int) bool {
-		if policies[i].Name == policies[j].Name {
-			return policies[i].Version < policies[j].Version
+		nameI, _ := policies[i]["name"].(string)
+		nameJ, _ := policies[j]["name"].(string)
+		if nameI == nameJ {
+			versionI, _ := policies[i]["version"].(string)
+			versionJ, _ := policies[j]["version"].(string)
+			return versionI < versionJ
 		}
-		return policies[i].Name < policies[j].Name
+		return nameI < nameJ
 	})
 
 	// Get all certificates
-	var certificates []api.CertificateResponse
+	var certificates []adminapi.CertificateResponse
 	totalBytes := 0
 
 	if s.db == nil {
@@ -2248,8 +2263,8 @@ func (s *APIServer) BuildConfigDumpResponse(log *slog.Logger) (*api.ConfigDumpRe
 		for _, cert := range certs {
 			totalBytes += len(cert.Certificate)
 
-			certStatus := api.CertificateResponseStatus("success")
-			certificates = append(certificates, api.CertificateResponse{
+			certStatus := "success"
+			certificates = append(certificates, adminapi.CertificateResponse{
 				Id:       &cert.ID,
 				Name:     &cert.Name,
 				Subject:  &cert.Subject,
@@ -2271,7 +2286,7 @@ func (s *APIServer) BuildConfigDumpResponse(log *slog.Logger) (*api.ConfigDumpRe
 	policyChainVersion := s.getPolicyChainVersionString()
 
 	// Build response
-	response := &api.ConfigDumpResponse{
+	response := &adminapi.ConfigDumpResponse{
 		Status:       &status,
 		Timestamp:    &timestamp,
 		Apis:         &apisSlice,
@@ -2288,7 +2303,7 @@ func (s *APIServer) BuildConfigDumpResponse(log *slog.Logger) (*api.ConfigDumpRe
 			TotalCertificates:     &totalCertificates,
 			TotalCertificateBytes: &totalBytes,
 		},
-		XdsSync: &api.ConfigDumpXDSSync{
+		XdsSync: &adminapi.ConfigDumpXDSSync{
 			PolicyChainVersion: &policyChainVersion,
 		},
 	}
@@ -2746,4 +2761,16 @@ func (s *APIServer) populatePropsForSystemPolicies(srcConfig any, props map[stri
 	}
 	// Template handle is now extracted and added to route metadata in translator.go
 	// No need to pass template via props anymore
+}
+
+func toGenericMap(value interface{}) (map[string]interface{}, error) {
+	bytes, err := json.Marshal(value)
+	if err != nil {
+		return nil, err
+	}
+	var result map[string]interface{}
+	if err := json.Unmarshal(bytes, &result); err != nil {
+		return nil, err
+	}
+	return result, nil
 }
