@@ -184,7 +184,6 @@ if [ "${#browser_files[@]}" -gt 0 ]; then
 	node "$@"
 	[ -s "$out/browser-report/lcov.info" ] || die "browser coverage reporter produced no LCOV report"
 	[ -s "$out/browser-report/summary.json" ] || die "browser coverage reporter produced no summary"
-	command -v rg >/dev/null 2>&1 || die "ripgrep (rg) is unavailable"
 
 	# Keep product reports separate so a combined UI percentage cannot hide which
 	# frontend produced it. The combined report above remains useful for one upload.
@@ -207,18 +206,18 @@ if [ "${#browser_files[@]}" -gt 0 ]; then
 	}
 
 	if find "$raw_root/blocks" -type f -name 'raw-istanbul.json' -print -quit | grep -q . \
-		&& rg -l 'AIWorkspace|/web/src/(App|Components|pages)/' "$raw_root/blocks" >/dev/null; then
+		&& grep -rqE --exclude='.*' --exclude-dir='.*' 'AIWorkspace|/web/src/(App|Components|pages)/' "$raw_root/blocks"; then
 		run_product_browser_report ai-workspace-ui portals/ai-workspace/src portals/ai-workspace/src 'portals/ai-workspace/src/**'
 	fi
 	# The two portals are served from different container roots: AI Workspace from /web,
 	# API Portal from /app. Matching the wrong one silently skips the whole report.
 	if find "$raw_root/blocks" -type f -name 'raw-istanbul.json' -print -quit | grep -q . \
-		&& rg -l '/app/src/scripts/' "$raw_root/blocks" >/dev/null; then
+		&& grep -rqE --exclude='.*' --exclude-dir='.*' '/app/src/scripts/' "$raw_root/blocks"; then
 		run_product_browser_report api-portal-ui portals/api-portal/src/scripts portals/api-portal/src/scripts 'portals/api-portal/src/scripts/**/*.js'
 	fi
 	# The Management Portal also builds under /app, but outside /app/src/scripts.
 	if find "$raw_root/blocks" -type f -name 'raw-istanbul.json' -print -quit | grep -q . \
-		&& rg -l '/app/src/(pages|App\.tsx|main\.tsx)' "$raw_root/blocks" >/dev/null; then
+		&& grep -rqE --exclude='.*' --exclude-dir='.*' '/app/src/(pages|App\.tsx|main\.tsx)' "$raw_root/blocks"; then
 		run_product_browser_report api-control-plane-ui portals/api-control-plane/src portals/api-control-plane/src \
 			'portals/api-control-plane/src/**' /app/src/=portals/api-control-plane/src/
 	fi

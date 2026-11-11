@@ -44,8 +44,12 @@ jobs:
       # keep the two in step.
       - name: Ensure C compiler is available
         run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential
+          if command -v gcc >/dev/null && command -v make >/dev/null; then
+            gcc --version | head -n1
+          else
+            sudo apt-get update -o Acquire::Retries=3
+            sudo apt-get install -y -o Acquire::Retries=3 build-essential
+          fi
 
       - name: Raise the conntrack table limit
         run: sudo sysctl -w net.netfilter.nf_conntrack_max=524288
